@@ -128,7 +128,6 @@ if "rag_backend" not in st.session_state:
             time.sleep(1)
         except Exception as e:
             st.error(f"Failed to initialize backend: {e}")
-            st.warning("Please ensure you have:\n- Set GEMINI_API_KEY in .env file\n- Run 'embedding_comparison.py' to generate chunks")
             st.stop()
 
 # Display Chat History
@@ -167,7 +166,7 @@ if prompt := st.chat_input("Ask a legal question (e.g., 'What is the procedure f
         except Exception as e:
             status_placeholder.empty()
             st.error(f"An error occurred: {e}")
-            st.warning("Please check:\n- Your GEMINI_API_KEY is valid\n- You have internet connection\n- API quota is not exceeded")
+            st.warning("Please check:\n- Your GEMINI_API_KEY is valid (in secrets or .env)\n- You have internet connection\n- API quota is not exceeded")
 
 # Footer
 st.markdown("""

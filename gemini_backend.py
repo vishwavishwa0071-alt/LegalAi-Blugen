@@ -6,6 +6,7 @@ import numpy as np
 import pickle
 from typing import List
 from dotenv import load_dotenv
+import streamlit as st
 from google import genai
 
 # Load environment variables
@@ -15,7 +16,11 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Constants
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+except (KeyError, FileNotFoundError):
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
 EMBEDDING_MODEL = "gemini-embedding-001"
 LLM_MODEL = "gemini-2.5-flash-lite"
 METADATA_FILE = "cpc_metadata.json"
@@ -45,7 +50,7 @@ class GeminiRAGBackend:
     def __init__(self):
         """Initialize the Gemini RAG backend"""
         if not GEMINI_API_KEY:
-            raise ValueError("GEMINI_API_KEY not found in environment variables")
+            raise ValueError("GEMINI_API_KEY not found in Streamlit secrets or environment variables")
         
         # Initialize Gemini client
         self.client = genai.Client(api_key=GEMINI_API_KEY)
