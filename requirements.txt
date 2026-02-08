@@ -1,0 +1,8 @@
+faiss-cpu
+docling
+httpx
+numpy
+streamlit
+watchdog
+google-genai
+python-dotenv
