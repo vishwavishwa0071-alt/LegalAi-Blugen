@@ -38,8 +38,17 @@ st.markdown("""
 html, body, [data-testid="stAppViewContainer"] {
     background: #080c18 !important;
     font-family: 'Inter', sans-serif;
+    color: #d4e4ff;
 }
-[data-testid="stHeader"] { background: transparent !important; }
+[data-testid="stHeader"] { background: rgba(8, 12, 24, 0.9) !important; backdrop-filter: blur(10px); }
+
+/* ── Fix White Bottom Bar ── */
+[data-testid="stBottom"] {
+    background: #080c18 !important;
+}
+[data-testid="stBottom"] > div {
+    background: transparent !important;
+}
 
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 6px; }
@@ -112,10 +121,13 @@ html, body, [data-testid="stAppViewContainer"] {
 .msg-row {
     display: flex;
     align-items: flex-start;
-    margin-bottom: 1.5rem;
+    margin-bottom: 2rem;
+    width: 100%;
     animation: fadeSlideIn 0.4s ease forwards;
 }
-.msg-row.user { flex-direction: row-reverse; }
+.msg-row.user { 
+    flex-direction: row-reverse; 
+}
 
 .avatar {
     width: 40px; height: 40px;
@@ -367,16 +379,32 @@ html, body, [data-testid="stAppViewContainer"] {
     background: linear-gradient(135deg, #1a3a7e, #0e5a8a) !important;
     border: 1px solid rgba(56,100,180,0.5) !important;
     color: #d4e4ff !important;
-    border-radius: 10px !important;
-    padding: 0.5rem 1.2rem !important;
-    font-weight: 500 !important;
-    transition: all 0.2s !important;
+    border-radius: 12px !important;
+    padding: 0.6rem 1.5rem !important;
+    font-weight: 600 !important;
+    font-size: 0.9rem !important;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    text-transform: none !important;
+    letter-spacing: 0.02em !important;
 }
 .stButton > button:hover {
-    border-color: rgba(245,200,66,0.6) !important;
+    border-color: rgba(245,200,66,0.8) !important;
     color: #f5c842 !important;
-    transform: translateY(-1px) !important;
-    box-shadow: 0 4px 15px rgba(0,0,0,0.4) !important;
+    transform: translateY(-2px) !important;
+    box-shadow: 0 8px 25px rgba(0,0,0,0.5), 0 0 10px rgba(245,200,66,0.2) !important;
+}
+.stButton > button:active {
+    transform: translateY(0px) !important;
+}
+/* Specifically for the Clear button to make it look distinct but premium */
+[data-testid="stBaseButton-secondary"].clear-btn {
+    background: rgba(40, 20, 20, 0.4) !important;
+    border: 1px solid rgba(255, 100, 100, 0.2) !important;
+}
+[data-testid="stBaseButton-secondary"].clear-btn:hover {
+    background: rgba(60, 20, 20, 0.6) !important;
+    border-color: rgba(255, 100, 100, 0.5) !important;
+    color: #ff8080 !important;
 }
 
 /* ── Spinners / loading ── */
@@ -466,7 +494,7 @@ def load_vector_store():
 
 @st.cache_resource(show_spinner=False)
 def load_llm():
-    return ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=API_KEY)
+    return ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=API_KEY)
 
 
 # ─────────────────────────────────────────────
@@ -474,16 +502,14 @@ def load_llm():
 # ─────────────────────────────────────────────
 def get_highlighted_pdf_bytes(pdf_path: str, page_num: int, search_text: str) -> bytes | None:
     """
-    Extract the target page and highlight ALL text from the retrieved context
-    chunk in gold.  Works sentence-by-sentence so the entire retrieved passage
-    is marked — not just the opening phrase.
-
-    Strategy per sentence:
-      1. Try the full sentence.
-      2. Fall back to progressively shorter leading sub-phrases (12, 9, 7, 5, 4 words).
-      3. If still no hit, try any 5-word window sliding through the sentence.
+    Extract the target page and highlight relevant text from the retrieved context.
+    Uses a multi-tier matching strategy to ensure the actual passage is found
+    while avoiding 'dirty' highlights on common words/headers.
     """
     try:
+        if not os.path.exists(pdf_path):
+            return None
+            
         src = fitz.open(pdf_path)
         if page_num >= len(src):
             page_num = len(src) - 1
@@ -491,68 +517,88 @@ def get_highlighted_pdf_bytes(pdf_path: str, page_num: int, search_text: str) ->
         out = fitz.open()
         out.insert_pdf(src, from_page=page_num, to_page=page_num)
         src.close()
-
         page = out[0]
 
-        # ── Normalise the chunk text ───────────────────────────────────────
+        # ── Normalize text ──
         clean_text = re.sub(r'\s+', ' ', search_text).strip()
+        
+        # ── Filter out very generic header/footer markers if they appear in chunk ──
+        # (e.g. page numbers, common document titles that cause 'irrelevant' highlights)
+        noise_patterns = [
+            r'THE CODE OF CIVIL PROCEDURE', r'ARRANGEMENT OF SECTIONS',
+            r'TAMIL NADU GOVERNMENT GAZETTE', r'PUBLISHED BY AUTHORITY'
+        ]
+        text_to_process = clean_text
+        for pat in noise_patterns:
+            text_to_process = re.sub(pat, '', text_to_process, flags=re.IGNORECASE)
 
-        # ── Split into sentences (handles "." ";" "\n" as sentence breaks) ─
-        raw_sentences = re.split(r'(?<=[.;!?])\s+|\n+', clean_text)
-        sentences = [s.strip() for s in raw_sentences if len(s.strip()) >= 15]
+        # ── Split into significant sentences (min 20 chars) ──
+        raw_sentences = re.split(r'(?<=[.;!?])\s+|\n+', text_to_process)
+        sentences = [s.strip() for s in raw_sentences if len(s.strip()) >= 20]
 
-        # If no usable sentence boundaries, treat whole text as one chunk
         if not sentences:
-            sentences = [clean_text]
+            sentences = [clean_text[:200]]
 
-        def _highlight_phrase(text: str) -> int:
-            """Try to find *text* on the page and annotate. Returns hit count."""
+        def _highlight_phrase(text: str, is_fallback=False) -> int:
+            if len(text.strip()) < 12 and not is_fallback:
+                return 0
             hits = page.search_for(text, quads=True)
+            count = 0
             for quad in hits:
+                # Add highlighting
                 ann = page.add_highlight_annot(quad)
-                ann.set_colors(stroke=[1.0, 0.85, 0.0])   # gold
-                ann.set_opacity(0.6)
+                ann.set_colors(stroke=[1.0, 0.82, 0.0]) # Gold
+                ann.set_opacity(0.55 if not is_fallback else 0.3)
                 ann.update()
-            return len(hits)
+                count += 1
+            return count
 
         total_hits = 0
-
         for sentence in sentences:
             words = sentence.split()
-            matched = False
-
-            # 1. Try progressively shorter leading sub-phrases
-            for length in [len(words), 12, 9, 7, 5, 4]:
-                if length > len(words) or length < 4:
-                    continue
+            if not words: continue
+            
+            # Tier 1: Try the full sentence (the best & cleanest match)
+            if _highlight_phrase(sentence):
+                total_hits += 1
+                continue
+                
+            # Tier 2: Try longest contiguous sub-phrases (avoiding small fragments)
+            # Try 75% of the sentence, then 50%
+            matched_tier2 = False
+            for ratio in [0.75, 0.5]:
+                length = int(len(words) * ratio)
+                if length < 6: continue
+                
                 phrase = " ".join(words[:length])
                 if _highlight_phrase(phrase):
                     total_hits += 1
-                    matched = True
+                    matched_tier2 = True
                     break
+            
+            if matched_tier2: continue
 
-            # 2. If leading phrase failed, slide a 5-word window through sentence
-            if not matched and len(words) >= 5:
-                for start in range(0, len(words) - 4, 3):   # step=3 to avoid dupes
-                    phrase = " ".join(words[start:start + 5])
+            # Tier 3: Sliding window (only as last resort, min 6 words)
+            if len(words) >= 7:
+                window_size = 6
+                for start in range(0, len(words) - window_size, 4):
+                    phrase = " ".join(words[start:start + window_size])
                     if _highlight_phrase(phrase):
                         total_hits += 1
-                        matched = True
-                        # Keep going to highlight more windows in same sentence
-                        for start2 in range(start + 5, len(words) - 4, 5):
-                            phrase2 = " ".join(words[start2:start2 + 5])
-                            _highlight_phrase(phrase2)
-                        break
+                        break # Stop after first window match to avoid 'over-highlighting'
 
-        # 3. Global fallback: if absolutely nothing matched, try first 100 chars
-        if total_hits == 0:
-            _highlight_phrase(clean_text[:100])
+        # Tier 4: Global fallback only if NOTHING was found
+        if total_hits == 0 and len(clean_text) > 30:
+            # Try a safe-length unique-ish chunk from the middle
+            middle = len(clean_text) // 2
+            fallback_chunk = clean_text[middle:middle+50]
+            _highlight_phrase(fallback_chunk, is_fallback=True)
 
         pdf_bytes = out.tobytes(garbage=3, deflate=True)
         out.close()
         return pdf_bytes
     except Exception as e:
-        st.warning(f"Could not prepare PDF preview: {e}")
+        st.warning(f"Highlighting notice: {e}")
         return None
 
 
@@ -839,84 +885,72 @@ def render_thinking_indicator():
 
 
 # ─────────────────────────────────────────────
-#  Main Layout
+#  Sidebar Controls
+# ─────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("""
+    <div style="text-align:center; padding: 1rem 0;">
+        <div style="font-size:3rem; margin-bottom:1rem;">⚖️</div>
+        <div style="font-family:'Playfair Display', serif; font-size:1.2rem; color:#f5c842;">Legal AI Control</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    if st.button("🗑️ Clear Conversation", key="clear_btn_sidebar", use_container_width=True):
+        st.session_state.messages = []
+        st.session_state.preview_source = None
+        st.session_state.preview_msg_idx = None
+        st.rerun()
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.info("Click any document source next to an AI response to view the verified PDF excerpt.")
+
+# ─────────────────────────────────────────────
+#  Main Chat Layout (Full Width)
 # ─────────────────────────────────────────────
 render_header()
 
-has_preview = st.session_state.preview_source is not None
-has_messages = len(st.session_state.messages) > 0
-
-# ── STATIC LAYOUT (3:2 split) ─────────────────
-main_cols = st.columns([3, 2], gap="large")
-
-# ── CHAT COLUMN (LEFT) ─────────────────────────
-with main_cols[0]:
+if not st.session_state.messages:
+    render_welcome()
+else:
+    # Use a container for the whole chat to maintain structure
     chat_container = st.container()
     with chat_container:
-        if not st.session_state.messages:
-            render_welcome()
-        else:
-            for idx, msg in enumerate(st.session_state.messages):
-                if msg["role"] == "user":
-                    # User bubbles: full width
-                    render_message(role="user", content=msg["content"])
-                else:
-                    # AI response + sources panel: SIDE BY SIDE
-                    sources = msg.get("sources") or []
-                    if sources:
-                        resp_col, src_col = st.columns([3, 2], gap="medium")
-                        with resp_col:
-                            render_message(role="assistant", content=msg["content"])
-                        with src_col:
-                            render_inline_sources(sources, msg_idx=idx)
-                    else:
-                        # No sources — full width response
+        for idx, msg in enumerate(st.session_state.messages):
+            if msg["role"] == "user":
+                render_message(role="user", content=msg["content"])
+            else:
+                sources = msg.get("sources") or []
+                # Split AI response and Sources/Preview into two columns *within* the message row
+                if sources:
+                    ai_cols = st.columns([1, 1], gap="large") # 50/50 split for clear context
+                    with ai_cols[0]:
                         render_message(role="assistant", content=msg["content"])
+                    with ai_cols[1]:
+                        # Always show the source buttons
+                        render_inline_sources(sources, msg_idx=idx)
+                        
+                        # IF this specific message's PDF preview is active, render it right here
+                        if st.session_state.preview_msg_idx == idx and st.session_state.preview_source:
+                            render_pdf_panel(st.session_state.preview_source)
+                else:
+                    render_message(role="assistant", content=msg["content"])
 
-        # Thinking bubble (while processing)
-        if st.session_state.is_thinking:
-            render_thinking_indicator()
+    # Thinking bubble (while processing)
+    if st.session_state.is_thinking:
+        render_thinking_indicator()
 
-st.markdown("---")
+st.markdown("<div style='height:120px'></div>", unsafe_allow_html=True) # Spacer for chat input
 
-
-# ── RIGHT PANEL ─────────────────────────────────
-with main_cols[1]:
-    # Clear chat button at top when there are messages
-    if has_messages:
-        if st.button("🗑️ Clear Conversation", key="clear_btn_v3", use_container_width=True):
-            st.session_state.messages = []
-            st.session_state.preview_source = None
-            st.session_state.preview_msg_idx = None
-            st.rerun()
-        st.markdown("<br>", unsafe_allow_html=True)
-
-    if has_preview:
-        # Show the full PDF viewer for the clicked source
-        render_pdf_panel(st.session_state.preview_source)
-    else:
-        # Placeholder
-        st.markdown("""
-        <div class="pdf-panel" style="text-align:center; padding: 5rem 1rem; opacity:0.6; min-height: 400px;">
-            <div style="font-size:4rem; margin-bottom:1.5rem;">⚖️</div>
-            <div style="color:#8099c5; font-size:1rem; font-family:'Playfair Display', serif;">
-                Legal Reference Dashboard
-            </div>
-            <div style="color:#5a78b0; font-size:0.85rem; margin-top:0.5rem; max-width:240px; margin-left:auto; margin-right:auto;">
-                Click any source button next to a response to view the full PDF with highlighted text here.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-
-# ── Run the actual RAG (on rerun when is_thinking=True) ─────────────────────
+# ── Run the actual RAG engine ─────────────────────
 if st.session_state.is_thinking:
     last_user_msg = next(
         (m for m in reversed(st.session_state.messages) if m["role"] == "user"),
         None,
     )
     if last_user_msg:
-        with st.spinner("Analysing legal documents…"):
+        with st.spinner(" "): # Spinner handled by render_thinking_indicator
             try:
                 answer, sources = run_rag_query(last_user_msg["content"])
             except Exception as e:
@@ -930,16 +964,14 @@ if st.session_state.is_thinking:
     st.session_state.is_thinking = False
     st.rerun()
 
-
-# ── Global Chat Input (docked at bottom, always visible) ─────────────────────
-user_query = st.chat_input("Ask a legal question about Tamil Nadu laws or CPC…")
+# ── Global Chat Input ────────────────────────────────────────────────────────
+user_query = st.chat_input("Ask a legal question...")
 if user_query:
     st.session_state.messages.append({
         "role":    "user",
         "content": user_query.strip(),
         "sources": None,
     })
-    # Reset the right-panel PDF viewer for the new query (but inline previews persist)
     st.session_state.preview_source = None
     st.session_state.preview_msg_idx = None
     st.session_state.is_thinking = True
