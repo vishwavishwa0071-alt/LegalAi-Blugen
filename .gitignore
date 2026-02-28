@@ -1,0 +1,29 @@
+# Environment variables (NEVER commit API keys!)
+.env
+*.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+env/
+venv/
+.venv/
+
+# Large binary/data files (vector stores & PDFs - too large for GitHub)
+data/
+pdf/
+unified_vector_store/
+vector_stores/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

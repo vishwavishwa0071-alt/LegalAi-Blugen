@@ -1,0 +1,946 @@
+import streamlit as st
+import os
+import re
+import base64
+import fitz  # PyMuPDF
+from dotenv import load_dotenv
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_community.vectorstores import FAISS
+
+# ─────────────────────────────────────────────
+#  MUST be the very first Streamlit call
+# ─────────────────────────────────────────────
+st.set_page_config(
+    page_title="Legal AI Expert",
+    page_icon="⚖️ ",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# ─────────────────────────────────────────────
+#  Environment & Paths
+# ─────────────────────────────────────────────
+load_dotenv()
+API_KEY = os.getenv("GOOGLE_API_KEY")
+BASE_DIR = r"c:\Users\kousi\Downloads\RAG"
+UNIFIED_INDEX_DIR = os.path.join(BASE_DIR, "unified_vector_store")
+PDF_DIR = os.path.join(BASE_DIR, "pdf")
+
+# ─────────────────────────────────────────────
+#  CSS – Dark Legal Theme
+# ─────────────────────────────────────────────
+st.markdown("""
+<style>
+/* ── Google Font ── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:wght@600;700&display=swap');
+
+/* ── Root Reset ── */
+html, body, [data-testid="stAppViewContainer"] {
+    background: #080c18 !important;
+    font-family: 'Inter', sans-serif;
+}
+[data-testid="stHeader"] { background: transparent !important; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #0d1117; }
+::-webkit-scrollbar-thumb { background: #2d4a7a; border-radius: 4px; }
+
+/* ── Header Banner ── */
+.header-banner {
+    background: linear-gradient(135deg, #0d1b3e 0%, #1a0a3e 50%, #0d3347 100%);
+    border-bottom: 1px solid rgba(250,200,80,0.25);
+    padding: 1.2rem 2rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    box-shadow: 0 4px 30px rgba(0,0,0,0.6);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+.header-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 1.7rem;
+    font-weight: 700;
+    background: linear-gradient(90deg, #f5c842, #e8a020, #f5c842);
+    background-size: 200%;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: shimmer 3s linear infinite;
+}
+@keyframes shimmer {
+    0% { background-position: 0% } 
+    100% { background-position: 200% }
+}
+.header-badge {
+    background: linear-gradient(135deg, #f5c842, #d4900a);
+    color: #0d1b3e;
+    padding: 0.2rem 0.8rem;
+    border-radius: 20px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+.header-sub {
+    color: #8099c5;
+    font-size: 0.82rem;
+    margin-top: 0.15rem;
+}
+
+/* ── Chat Container ── */
+.chat-container {
+    background: rgba(10, 18, 40, 0.4);
+    border: 1px solid rgba(56, 100, 180, 0.2);
+    border-radius: 16px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+.chat-scroll-area {
+    height: 65vh !important;
+    overflow-y: auto !important;
+    padding-right: 10px;
+}
+
+/* ── Message Bubbles ── */
+@keyframes fadeSlideIn {
+    from { opacity: 0; transform: translateY(14px); }
+    to   { opacity: 1; transform: translateY(0px); }
+}
+
+.msg-row {
+    display: flex;
+    align-items: flex-start;
+    margin-bottom: 1.5rem;
+    animation: fadeSlideIn 0.4s ease forwards;
+}
+.msg-row.user { flex-direction: row-reverse; }
+
+.avatar {
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.2rem;
+    flex-shrink: 0;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+}
+.avatar.ai {
+    background: linear-gradient(135deg, #1a3a6e, #0e5a8a);
+    border: 2px solid rgba(245,200,66,0.4);
+    margin-right: 0.8rem;
+}
+.avatar.user {
+    background: linear-gradient(135deg, #3d1c6e, #6b21a8);
+    border: 2px solid rgba(168,85,247,0.4);
+    margin-left: 0.8rem;
+}
+
+.bubble {
+    max-width: 85%;
+    padding: 1rem 1.35rem;
+    border-radius: 18px;
+    line-height: 1.6;
+    font-size: 0.95rem;
+    box-shadow: 0 6px 25px rgba(0,0,0,0.45);
+    flex-grow: 0;
+}
+.bubble.ai {
+    background: linear-gradient(145deg, rgba(16,30,60,0.9), rgba(10,22,48,0.95));
+    border: 1px solid rgba(56,100,180,0.35);
+    color: #d4e4ff;
+    border-top-left-radius: 4px;
+}
+.bubble.user {
+    background: linear-gradient(135deg, #3b0e72, #5b21b6);
+    border: 1px solid rgba(167,84,207,0.4);
+    color: #f0e4ff;
+    border-top-right-radius: 4px;
+}
+
+/* ── Inline Sources Panel (per message) ── */
+.inline-sources-panel {
+    background: linear-gradient(145deg, rgba(8,14,32,0.97), rgba(5,10,24,0.99));
+    border: 1px solid rgba(56,100,180,0.3);
+    border-radius: 14px;
+    padding: 0.8rem 1rem;
+    margin: 0;
+    animation: fadeSlideIn 0.4s ease forwards;
+    height: 100%;
+}
+.inline-sources-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.65rem;
+    padding-bottom: 0.55rem;
+    border-bottom: 1px solid rgba(56,100,180,0.2);
+}
+.inline-sources-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #8099c5;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+}
+/* Horizontal category label */
+.cat-col-label {
+    font-size: 0.67rem;
+    color: #f5c842;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.055em;
+    margin-bottom: 0.4rem;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.cat-col-label::before {
+    content: '';
+    display: inline-block;
+    width: 3px; height: 10px;
+    background: #f5c842;
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+/* Active source chip */
+.src-active-chip {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: rgba(245,200,66,0.12);
+    border: 1px solid rgba(245,200,66,0.5);
+    border-radius: 8px;
+    padding: 0.35rem 0.7rem;
+    font-size: 0.76rem;
+    color: #f5c842;
+    margin-bottom: 4px;
+    line-height: 1.3;
+}
+/* Category divider label */
+.cat-divider {
+    font-size: 0.67rem;
+    font-weight: 700;
+    color: #f5c842;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    margin: 0.55rem 0 0.3rem 0;
+    padding-bottom: 0.25rem;
+    border-bottom: 1px solid rgba(245,200,66,0.2);
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+/* ── Welcome Screen ── */
+.welcome-wrapper {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 3rem 1rem;
+    animation: fadeSlideIn 0.6s ease forwards;
+}
+.welcome-seal {
+    font-size: 5rem;
+    filter: drop-shadow(0 0 20px rgba(245,200,66,0.4));
+    animation: pulse-glow 2.5s ease-in-out infinite;
+}
+@keyframes pulse-glow {
+    0%, 100% { filter: drop-shadow(0 0 12px rgba(245,200,66,0.3)); }
+    50% { filter: drop-shadow(0 0 30px rgba(245,200,66,0.7)); }
+}
+.welcome-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 2rem;
+    font-weight: 700;
+    color: #f5c842;
+    margin-top: 1rem;
+    text-align: center;
+}
+.welcome-sub {
+    color: #8099c5;
+    text-align: center;
+    max-width: 520px;
+    margin-top: 0.5rem;
+    font-size: 0.9rem;
+    line-height: 1.6;
+}
+
+/* ── Source Pills ── */
+.source-pill-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+.source-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: rgba(20,40,80,0.8);
+    border: 1px solid rgba(56,100,180,0.4);
+    border-radius: 20px;
+    padding: 0.3rem 0.75rem;
+    font-size: 0.75rem;
+    color: #a0c0ff;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.source-pill:hover {
+    border-color: rgba(245,200,66,0.6);
+    color: #f5c842;
+    background: rgba(30,55,100,0.9);
+}
+
+/* ── PDF Preview Panel (right column) ── */
+.pdf-panel {
+    background: linear-gradient(185deg, rgba(10,18,40,0.98), rgba(6,14,32,0.99));
+    border: 1px solid rgba(56,100,180,0.35);
+    border-radius: 16px;
+    padding: 1.2rem;
+    height: 100%;
+    animation: fadeSlideIn 0.35s ease forwards;
+}
+.pdf-panel-header {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 0.8rem;
+    padding-bottom: 0.8rem;
+    border-bottom: 1px solid rgba(56,100,180,0.25);
+}
+.pdf-panel-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #d4e4ff;
+}
+.pdf-meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-bottom: 0.8rem;
+}
+.pdf-meta-chip {
+    background: rgba(20,40,80,0.7);
+    border: 1px solid rgba(56,100,180,0.3);
+    border-radius: 8px;
+    padding: 0.2rem 0.6rem;
+    font-size: 0.72rem;
+    color: #8099c5;
+}
+.pdf-meta-chip span { color: #a8c4f0; font-weight: 500; }
+.pdf-path-box {
+    background: rgba(8,14,32,0.8);
+    border: 1px solid rgba(30,60,120,0.5);
+    border-radius: 8px;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.7rem;
+    color: #5a78b0;
+    font-family: 'Courier New', monospace;
+    word-break: break-all;
+    margin-bottom: 1rem;
+}
+.pdf-path-box span { color: #f5c842; }
+.highlight-text-box {
+    background: rgba(245,200,66,0.06);
+    border-left: 3px solid #f5c842;
+    border-radius: 0 8px 8px 0;
+    padding: 0.6rem 0.8rem;
+    font-size: 0.78rem;
+    color: #c8d8f0;
+    line-height: 1.6;
+    margin-bottom: 1rem;
+    font-style: italic;
+}
+
+/* ── Input Area Reset ── */
+[data-testid="stChatInput"] {
+    border-radius: 12px !important;
+}
+
+/* ── Buttons ── */
+.stButton > button {
+    background: linear-gradient(135deg, #1a3a7e, #0e5a8a) !important;
+    border: 1px solid rgba(56,100,180,0.5) !important;
+    color: #d4e4ff !important;
+    border-radius: 10px !important;
+    padding: 0.5rem 1.2rem !important;
+    font-weight: 500 !important;
+    transition: all 0.2s !important;
+}
+.stButton > button:hover {
+    border-color: rgba(245,200,66,0.6) !important;
+    color: #f5c842 !important;
+    transform: translateY(-1px) !important;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.4) !important;
+}
+
+/* ── Spinners / loading ── */
+@keyframes thinking-dots {
+    0%, 80%, 100% { opacity: 0; transform: scale(0.8); }
+    40% { opacity: 1; transform: scale(1); }
+}
+.thinking-row { display: flex; align-items: center; gap: 8px; padding: 0.8rem 1rem; }
+.dot {
+    width: 8px; height: 8px;
+    background: #5a8fc5;
+    border-radius: 50%;
+    animation: thinking-dots 1.4s infinite ease-in-out both;
+}
+.dot:nth-child(2) { animation-delay: 0.2s; }
+.dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* ── Dividers ── */
+hr { border-color: rgba(56,100,180,0.2) !important; }
+
+/* ── Expander ── */
+[data-testid="stExpander"] {
+    background: rgba(10,18,40,0.6) !important;
+    border: 1px solid rgba(56,100,180,0.25) !important;
+    border-radius: 10px !important;
+}
+[data-testid="stExpander"] summary {
+    color: #8099c5 !important;
+    font-size: 0.8rem !important;
+}
+
+/* ── Category stat pills ── */
+.stat-row {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 0.4rem;
+    margin-bottom: 0.2rem;
+}
+.stat-pill {
+    background: rgba(15,30,70,0.8);
+    border: 1px solid rgba(56,100,180,0.3);
+    color: #8099c5;
+    font-size: 0.72rem;
+    border-radius: 20px;
+    padding: 0.2rem 0.6rem;
+}
+.stat-pill b { color: #c8d8f0; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────
+#  Session State Initialization
+# ─────────────────────────────────────────────
+def init_state():
+    defaults = {
+        "messages": [],          # [{role, content, sources}]
+        "preview_source": None,  # Source dict currently shown in right-panel PDF viewer
+        "preview_msg_idx": None, # Which message's source is being previewed
+        "is_thinking": False,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+init_state()
+
+
+# ─────────────────────────────────────────────
+#  Cached Resource Loaders
+# ─────────────────────────────────────────────
+@st.cache_resource(show_spinner=False)
+def load_vector_store():
+    """Load the unified FAISS vector store once and cache it."""
+    if not API_KEY:
+        st.error("GOOGLE_API_KEY not found in .env")
+        st.stop()
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model="models/gemini-embedding-001",
+        google_api_key=API_KEY
+    )
+    if not os.path.exists(UNIFIED_INDEX_DIR):
+        st.error(f"Unified vector store not found at: {UNIFIED_INDEX_DIR}\nRun `ingest_unified.py` first.")
+        st.stop()
+    return FAISS.load_local(UNIFIED_INDEX_DIR, embeddings, allow_dangerous_deserialization=True)
+
+@st.cache_resource(show_spinner=False)
+def load_llm():
+    return ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=API_KEY)
+
+
+# ─────────────────────────────────────────────
+#  PDF: Extract single page + highlight → bytes
+# ─────────────────────────────────────────────
+def get_highlighted_pdf_bytes(pdf_path: str, page_num: int, search_text: str) -> bytes | None:
+    """
+    Extract the target page and highlight ALL text from the retrieved context
+    chunk in gold.  Works sentence-by-sentence so the entire retrieved passage
+    is marked — not just the opening phrase.
+
+    Strategy per sentence:
+      1. Try the full sentence.
+      2. Fall back to progressively shorter leading sub-phrases (12, 9, 7, 5, 4 words).
+      3. If still no hit, try any 5-word window sliding through the sentence.
+    """
+    try:
+        src = fitz.open(pdf_path)
+        if page_num >= len(src):
+            page_num = len(src) - 1
+
+        out = fitz.open()
+        out.insert_pdf(src, from_page=page_num, to_page=page_num)
+        src.close()
+
+        page = out[0]
+
+        # ── Normalise the chunk text ───────────────────────────────────────
+        clean_text = re.sub(r'\s+', ' ', search_text).strip()
+
+        # ── Split into sentences (handles "." ";" "\n" as sentence breaks) ─
+        raw_sentences = re.split(r'(?<=[.;!?])\s+|\n+', clean_text)
+        sentences = [s.strip() for s in raw_sentences if len(s.strip()) >= 15]
+
+        # If no usable sentence boundaries, treat whole text as one chunk
+        if not sentences:
+            sentences = [clean_text]
+
+        def _highlight_phrase(text: str) -> int:
+            """Try to find *text* on the page and annotate. Returns hit count."""
+            hits = page.search_for(text, quads=True)
+            for quad in hits:
+                ann = page.add_highlight_annot(quad)
+                ann.set_colors(stroke=[1.0, 0.85, 0.0])   # gold
+                ann.set_opacity(0.6)
+                ann.update()
+            return len(hits)
+
+        total_hits = 0
+
+        for sentence in sentences:
+            words = sentence.split()
+            matched = False
+
+            # 1. Try progressively shorter leading sub-phrases
+            for length in [len(words), 12, 9, 7, 5, 4]:
+                if length > len(words) or length < 4:
+                    continue
+                phrase = " ".join(words[:length])
+                if _highlight_phrase(phrase):
+                    total_hits += 1
+                    matched = True
+                    break
+
+            # 2. If leading phrase failed, slide a 5-word window through sentence
+            if not matched and len(words) >= 5:
+                for start in range(0, len(words) - 4, 3):   # step=3 to avoid dupes
+                    phrase = " ".join(words[start:start + 5])
+                    if _highlight_phrase(phrase):
+                        total_hits += 1
+                        matched = True
+                        # Keep going to highlight more windows in same sentence
+                        for start2 in range(start + 5, len(words) - 4, 5):
+                            phrase2 = " ".join(words[start2:start2 + 5])
+                            _highlight_phrase(phrase2)
+                        break
+
+        # 3. Global fallback: if absolutely nothing matched, try first 100 chars
+        if total_hits == 0:
+            _highlight_phrase(clean_text[:100])
+
+        pdf_bytes = out.tobytes(garbage=3, deflate=True)
+        out.close()
+        return pdf_bytes
+    except Exception as e:
+        st.warning(f"Could not prepare PDF preview: {e}")
+        return None
+
+
+
+# ─────────────────────────────────────────────
+#  RAG Query Function
+# ─────────────────────────────────────────────
+LEGAL_PROMPT = """\
+You are a Senior Civil Procedural Law Expert AI. You are provided with a specific question and a set of retrieved context chunks from legal documents.
+
+Your task is to answer the user's question comprehensively using *only* the provided context.
+
+**Guidelines for your response:**
+
+1.  **Citation is Mandatory:** You must cite the specific legal source for every claim you make. Use the format: "Section X," "Order Y, Rule Z," or "Appendix [Letter], Form [Number]."
+2.  **Structure:**
+    *   **Direct Answer:** Start with a clear, direct response to the user's question.
+    *   **Procedural Details:** Explain the steps, requirements, or conditions found in the text.
+    *   **Exceptions/Provisos:** Explicitly mention any "Provided that" clauses or exceptions found in the context.
+3.  **Sections vs. Orders:** Distinguish between substantive law (Sections) and procedural rules (Orders/Rules) if the context contains both.
+4.  **State Amendments:** If the retrieved context contains "State Amendments" (e.g., for Tamil Nadu, Maharashtra, etc.), explicitly state that these apply only to those specific regions.
+5.  **Definitions:** If the user asks for a definition, use exact definitions provided in the context if available.
+6.  **Tone:** Maintain a professional, objective, and legal tone. Do not offer personal legal advice or opinions.
+7.  **Missing Information:** If the provided context does not contain the answer, state: "The provided context does not contain sufficient information to answer this specific question." Do not hallucinate.
+8. **briefness:** Keep the answer concise and to the point. Do not provide unnecessary information.
+**Context:**
+{context}
+
+**User Question:**
+{query}
+
+**Answer:**
+"""
+
+
+def run_rag_query(query: str):
+    """Run the unified RAG pipeline and return (answer_text, sources_list)."""
+    vs = load_vector_store()
+    llm = load_llm()
+
+    docs_and_scores = vs.similarity_search_with_score(query, k=8)
+
+    context_chunks = ""
+    sources = []
+    seen = set()
+
+    for doc, score in docs_and_scores:
+        cat = doc.metadata.get("category", "Unknown")
+        sub_cat = doc.metadata.get("sub_category", "Unknown")
+        source_file = doc.metadata.get("source_file", "Unknown")
+        page_num = int(doc.metadata.get("page", 0))
+        pdf_path = os.path.join(PDF_DIR, source_file)
+
+        context_chunks += (
+            f"--- Source: {source_file} (Category: {cat} | Sub-category: {sub_cat}) ---\n"
+            f"{doc.page_content}\n\n"
+        )
+
+        key = f"{source_file}:{page_num}"
+        if key not in seen:
+            seen.add(key)
+            sources.append({
+                "category": cat,
+                "sub_category": sub_cat,
+                "source_file": source_file,
+                "pdf_path": pdf_path,
+                "page": page_num,
+                "content": doc.page_content,
+                "score": float(score),
+            })
+
+    response = llm.invoke(LEGAL_PROMPT.format(context=context_chunks, query=query))
+    return response.content, sources
+
+
+# ─────────────────────────────────────────────
+#  UI Helpers
+# ─────────────────────────────────────────────
+def render_header():
+    st.markdown("""
+    <div class="header-banner">
+        <div style="font-size:2.2rem;filter:drop-shadow(0 0 10px rgba(245,200,66,0.5))">⚖️</div>
+        <div>
+            <div class="header-title">Legal AI Expert</div>
+            <div class="header-sub">Tamil Nadu Laws &amp; Code of Civil Procedure — Powered by Gemini AI</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_welcome():
+    st.markdown("""
+    <div class="welcome-wrapper">
+        <div class="welcome-seal">⚖️</div>
+        <div class="welcome-title">Ask Any Legal Question</div>
+        <div class="welcome-sub">
+            I have deep knowledge of Tamil Nadu State Laws, Code of Civil Procedure 1908, 
+            and related legislation — all backed by verified source documents.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_message(role: str, content: str):
+    """Render a single chat message bubble."""
+    if role == "user":
+        st.markdown(f"""
+        <div class="msg-row user">
+            <div class="avatar user">👤</div>
+            <div class="bubble user">{content}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        formatted = content
+        formatted = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', formatted)
+        formatted = re.sub(r'^\s*[\*\-]\s+', r'• ', formatted, flags=re.MULTILINE)
+        formatted = formatted.replace("\n", "<br>")
+
+        st.markdown(f"""
+        <div class="msg-row">
+            <div class="avatar ai">⚖️</div>
+            <div class="bubble ai">{formatted}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+
+def render_inline_sources(sources: list, msg_idx: int):
+    """
+    Render sources grouped by category directly beside the AI response.
+    Lives in its own column (parallel to the response bubble), so a clean
+    vertical list per category is the right UX - no nested column tricks needed.
+    """
+    if not sources:
+        return
+
+    categories: dict[str, list] = {}
+    for src in sources:
+        categories.setdefault(src["category"], []).append(src)
+
+    num_cats = len(categories)
+    num_srcs  = len(sources)
+
+    # Panel header
+    st.markdown(f"""
+    <div class="inline-sources-panel">
+        <div class="inline-sources-header">
+            <span style="font-size:1rem">&#128218;</span>
+            <div class="inline-sources-title">
+                {num_srcs} source{"s" if num_srcs != 1 else ""}
+                &nbsp;&middot;&nbsp;
+                {num_cats} categor{"ies" if num_cats != 1 else "y"}
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+
+    # One section per category - vertical list of buttons
+    for cat_name, cat_sources in categories.items():
+        short_cat = cat_name if len(cat_name) <= 30 else cat_name[:27] + "..."
+        st.markdown(
+            f'<div class="cat-divider">&#128194; {short_cat}</div>',
+            unsafe_allow_html=True,
+        )
+        for si, src in enumerate(cat_sources):
+            page_disp = src["page"] + 1
+            filename  = src["source_file"]
+            short_fn  = filename if len(filename) <= 22 else filename[:19] + "..."
+            btn_key   = f"isrc_{msg_idx}_{cat_name[:6]}_{si}"
+
+            is_active = (
+                st.session_state.preview_source is not None
+                and st.session_state.preview_source.get("source_file") == src["source_file"]
+                and st.session_state.preview_source.get("page")        == src["page"]
+                and st.session_state.preview_msg_idx == msg_idx
+            )
+
+            if is_active:
+                st.markdown(
+                    f'<div class="src-active-chip">'
+                    f'<span>&#9989;</span>'
+                    f'<span>{short_fn}&nbsp;<b style="color:#f5c842">p.{page_disp}</b></span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                if st.button(
+                    f"\U0001f4c4  {short_fn}  -  p.{page_disp}",
+                    key=btn_key,
+                    use_container_width=True,
+                ):
+                    st.session_state.preview_source = src
+                    st.session_state.preview_msg_idx = msg_idx
+                    st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+def render_pdf_panel(src: dict):
+    """Render the right-side full PDF preview panel."""
+    pdf_path = src["pdf_path"]
+    page_num = src["page"]
+    content = src["content"]
+    source_file = src["source_file"]
+    category = src["category"]
+    sub_cat = src["sub_category"]
+
+    st.markdown("""
+    <div class="pdf-panel">
+        <div class="pdf-panel-header">
+            <span style="font-size:1.3rem">&#128196;</span>
+            <div>
+                <div class="pdf-panel-title">PDF Source Preview</div>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <div class="pdf-meta-row">
+        <div class="pdf-meta-chip">&#128194; Category: <span>{category}</span></div>
+        <div class="pdf-meta-chip">&#128209; Sub-cat: <span>{sub_cat}</span></div>
+        <div class="pdf-meta-chip"> File: <span>{source_file}</span></div>
+        <div class="pdf-meta-chip">&#128214; Page: <span>{page_num + 1}</span></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    snippet = content[:400].strip().replace("\n", " ")
+    st.markdown(f"""
+    <div class="highlight-text-box">
+        <b style="color:#f5c842;font-style:normal">&#128269; Highlighted Paragraph:</b><br><br>
+        {snippet}{"..." if len(content) > 400 else ""}
+    </div>
+    """, unsafe_allow_html=True)
+
+    if os.path.exists(pdf_path):
+        with st.spinner("Loading PDF..."):
+            pdf_bytes = get_highlighted_pdf_bytes(pdf_path, page_num, content)
+
+        if pdf_bytes:
+            st.markdown(
+                f"**Page {page_num + 1} of** `{source_file}` — "
+                "matching text highlighted in **gold** ✦"
+            )
+            b64 = base64.b64encode(pdf_bytes).decode()
+            pdf_url = f"data:application/pdf;base64,{b64}#view=FitH&pagemode=none&navpanes=0&toolbar=0"
+            st.markdown(
+                f"""
+                <div style="height:700px; width:100%;">
+                    <iframe
+                        src="{pdf_url}"
+                        width="100%"
+                        height="700"
+                        style="border:none; border-radius:14px;
+                               box-shadow:0 12px 40px rgba(0,0,0,0.7);
+                               background: #0d1117;"
+                        title="PDF preview — {source_file}"
+                    ></iframe>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            st.warning("Could not prepare the PDF preview.")
+    else:
+        st.error(f"PDF file not found:\n`{pdf_path}`")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if st.button("✕ Close Preview", key="close_preview"):
+        st.session_state.preview_source = None
+        st.session_state.preview_msg_idx = None
+        st.rerun()
+
+
+def render_thinking_indicator():
+    st.markdown("""
+    <div class="msg-row">
+      <div class="avatar ai">⚖️</div>
+      <div class="bubble ai" style="padding:0.6rem 1.2rem">
+        <div class="thinking-row">
+          <span style="color:#5a8fc5;font-size:0.82rem">Analysing legal documents</span>
+          <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────
+#  Main Layout
+# ─────────────────────────────────────────────
+render_header()
+
+has_preview = st.session_state.preview_source is not None
+has_messages = len(st.session_state.messages) > 0
+
+# ── STATIC LAYOUT (3:2 split) ─────────────────
+main_cols = st.columns([3, 2], gap="large")
+
+# ── CHAT COLUMN (LEFT) ─────────────────────────
+with main_cols[0]:
+    chat_container = st.container()
+    with chat_container:
+        if not st.session_state.messages:
+            render_welcome()
+        else:
+            for idx, msg in enumerate(st.session_state.messages):
+                if msg["role"] == "user":
+                    # User bubbles: full width
+                    render_message(role="user", content=msg["content"])
+                else:
+                    # AI response + sources panel: SIDE BY SIDE
+                    sources = msg.get("sources") or []
+                    if sources:
+                        resp_col, src_col = st.columns([3, 2], gap="medium")
+                        with resp_col:
+                            render_message(role="assistant", content=msg["content"])
+                        with src_col:
+                            render_inline_sources(sources, msg_idx=idx)
+                    else:
+                        # No sources — full width response
+                        render_message(role="assistant", content=msg["content"])
+
+        # Thinking bubble (while processing)
+        if st.session_state.is_thinking:
+            render_thinking_indicator()
+
+st.markdown("---")
+
+
+# ── RIGHT PANEL ─────────────────────────────────
+with main_cols[1]:
+    # Clear chat button at top when there are messages
+    if has_messages:
+        if st.button("🗑️ Clear Conversation", key="clear_btn_v3", use_container_width=True):
+            st.session_state.messages = []
+            st.session_state.preview_source = None
+            st.session_state.preview_msg_idx = None
+            st.rerun()
+        st.markdown("<br>", unsafe_allow_html=True)
+
+    if has_preview:
+        # Show the full PDF viewer for the clicked source
+        render_pdf_panel(st.session_state.preview_source)
+    else:
+        # Placeholder
+        st.markdown("""
+        <div class="pdf-panel" style="text-align:center; padding: 5rem 1rem; opacity:0.6; min-height: 400px;">
+            <div style="font-size:4rem; margin-bottom:1.5rem;">⚖️</div>
+            <div style="color:#8099c5; font-size:1rem; font-family:'Playfair Display', serif;">
+                Legal Reference Dashboard
+            </div>
+            <div style="color:#5a78b0; font-size:0.85rem; margin-top:0.5rem; max-width:240px; margin-left:auto; margin-right:auto;">
+                Click any source button next to a response to view the full PDF with highlighted text here.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+
+# ── Run the actual RAG (on rerun when is_thinking=True) ─────────────────────
+if st.session_state.is_thinking:
+    last_user_msg = next(
+        (m for m in reversed(st.session_state.messages) if m["role"] == "user"),
+        None,
+    )
+    if last_user_msg:
+        with st.spinner("Analysing legal documents…"):
+            try:
+                answer, sources = run_rag_query(last_user_msg["content"])
+            except Exception as e:
+                answer  = f"⚠️ An error occurred: {str(e)}"
+                sources = []
+        st.session_state.messages.append({
+            "role":    "assistant",
+            "content": answer,
+            "sources": sources,
+        })
+    st.session_state.is_thinking = False
+    st.rerun()
+
+
+# ── Global Chat Input (docked at bottom, always visible) ─────────────────────
+user_query = st.chat_input("Ask a legal question about Tamil Nadu laws or CPC…")
+if user_query:
+    st.session_state.messages.append({
+        "role":    "user",
+        "content": user_query.strip(),
+        "sources": None,
+    })
+    # Reset the right-panel PDF viewer for the new query (but inline previews persist)
+    st.session_state.preview_source = None
+    st.session_state.preview_msg_idx = None
+    st.session_state.is_thinking = True
+    st.rerun()
