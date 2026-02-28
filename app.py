@@ -21,10 +21,9 @@ st.set_page_config(
 #  Environment & Paths
 # ─────────────────────────────────────────────
 load_dotenv()
-API_KEY = os.getenv("GOOGLE_API_KEY")
-BASE_DIR = r"c:\Users\kousi\Downloads\RAG"
-UNIFIED_INDEX_DIR = os.path.join(BASE_DIR, "unified_vector_store")
-PDF_DIR = os.path.join(BASE_DIR, "pdf")
+API_KEY = st.secrets["GEMINI_API_KEY"]
+UNIFIED_INDEX_DIR = "unified_vector_store"
+PDF_DIR = "pdf"
 
 # ─────────────────────────────────────────────
 #  CSS – Dark Legal Theme
@@ -494,7 +493,7 @@ def load_vector_store():
 
 @st.cache_resource(show_spinner=False)
 def load_llm():
-    return ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=API_KEY)
+    return ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", google_api_key=API_KEY)
 
 
 # ─────────────────────────────────────────────
