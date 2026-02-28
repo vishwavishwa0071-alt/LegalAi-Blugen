@@ -466,7 +466,7 @@ def load_vector_store():
 
 @st.cache_resource(show_spinner=False)
 def load_llm():
-    return ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=API_KEY)
+    return ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=API_KEY)
 
 
 # ─────────────────────────────────────────────
