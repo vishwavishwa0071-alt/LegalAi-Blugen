@@ -16,9 +16,8 @@ venv/
 
 # Large binary/data files (vector stores & PDFs - too large for GitHub)
 data/
-pdf/
-unified_vector_store/
-vector_stores/
+
+
 
 # OS files
 .DS_Store
