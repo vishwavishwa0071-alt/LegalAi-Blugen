@@ -17,13 +17,23 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+from pathlib import Path
+
 # ─────────────────────────────────────────────
 #  Environment & Paths
 # ─────────────────────────────────────────────
-load_dotenv()
-API_KEY = st.secrets["GEMINI_API_KEY"]
-UNIFIED_INDEX_DIR = "unified_vector_store"
-PDF_DIR = "pdf"
+# In Streamlit Cloud, secrets are used instead of .env
+# For local dev, you can still use .env or .streamlit/secrets.toml
+try:
+    API_KEY = st.secrets["GOOGLE_API_KEY"]
+except (KeyError, FileNotFoundError):
+    load_dotenv()
+    API_KEY = os.getenv("GOOGLE_API_KEY")
+
+# Set BASE_DIR relative to this file's location (good for GitHub/Deployment)
+BASE_DIR = Path(__file__).parent.absolute()
+UNIFIED_INDEX_DIR = os.path.join(BASE_DIR, "unified_vector_store")
+PDF_DIR = os.path.join(BASE_DIR, "pdf")
 
 # ─────────────────────────────────────────────
 #  CSS – Dark Legal Theme

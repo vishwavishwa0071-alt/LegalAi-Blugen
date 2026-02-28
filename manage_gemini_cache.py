@@ -8,9 +8,14 @@ import json
 from datetime import datetime
 
 
+from pathlib import Path
+
+# Set BASE_DIR relative to this file's location (good for GitHub/Deployment)
+BASE_DIR = Path(__file__).parent.absolute()
+
 def get_cache_info():
     """Get information about the embeddings cache"""
-    cache_file = "gemini_embeddings.pkl"
+    cache_file = os.path.join(BASE_DIR, "gemini_embeddings.pkl")
     
     if not os.path.exists(cache_file):
         return {
@@ -45,7 +50,7 @@ def get_cache_info():
 
 def get_metadata_info():
     """Get information about the chunk metadata"""
-    metadata_file = "cpc_metadata.json"
+    metadata_file = os.path.join(BASE_DIR, "cpc_metadata.json")
     
     if not os.path.exists(metadata_file):
         return {
@@ -81,7 +86,7 @@ def get_metadata_info():
 
 def delete_cache():
     """Delete the embeddings cache file"""
-    cache_file = "gemini_embeddings.pkl"
+    cache_file = os.path.join(BASE_DIR, "gemini_embeddings.pkl")
     
     if not os.path.exists(cache_file):
         print("❌ Cache file does not exist")
