@@ -25,7 +25,7 @@ from pathlib import Path
 # In Streamlit Cloud, secrets are used instead of .env
 # For local dev, you can still use .env or .streamlit/secrets.toml
 try:
-    API_KEY = st.secrets["GOOGLE_API_KEY"]
+    API_KEY = st.secrets["GEMINI_API_KEY"]
 except (KeyError, FileNotFoundError):
     load_dotenv()
     API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -489,9 +489,6 @@ init_state()
 @st.cache_resource(show_spinner=False)
 def load_vector_store():
     """Load the unified FAISS vector store once and cache it."""
-    if not API_KEY:
-        st.error("GOOGLE_API_KEY not found in .env")
-        st.stop()
     embeddings = GoogleGenerativeAIEmbeddings(
         model="models/gemini-embedding-001",
         google_api_key=API_KEY
