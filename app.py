@@ -31,8 +31,20 @@ except (KeyError, FileNotFoundError):
     API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # Set BASE_DIR relative to this file's location (good for GitHub/Deployment)
-BASE_DIR = Path(__file__).parent.absolute()
-UNIFIED_INDEX_DIR = os.path.join(BASE_DIR, "unified_vector_store")
+try:
+    ENV_LINK = st.secrets["DRIVE_LINK"]
+except (KeyError, FileNotFoundError):
+    ENV_LINK = os.getenv("DRIVE_LINK", "")
+
+LOCAL_DIR = Path(__file__).parent.absolute()
+
+# Handle web URLs by falling back to local directory (Python cannot read URLs as local folders)
+if ENV_LINK.startswith("http"):
+    BASE_DIR = str(LOCAL_DIR)
+else:
+    BASE_DIR = ENV_LINK or str(LOCAL_DIR)
+
+UNIFIED_INDEX_DIR = os.path.join(LOCAL_DIR, "unified_vector_store")
 PDF_DIR = os.path.join(BASE_DIR, "pdf")
 
 # ─────────────────────────────────────────────
