@@ -1,7 +1,6 @@
 import streamlit as st
 import os
 import re
-import base64
 import fitz  # PyMuPDF
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
@@ -659,9 +658,12 @@ def get_highlighted_pdf_bytes(raw_pdf_bytes: bytes, page_num: int, search_text: 
             fallback_chunk = clean_text[middle:middle+50]
             _highlight_phrase(fallback_chunk, is_fallback=True)
 
-        pdf_bytes = out.tobytes(garbage=3, deflate=True)
+        # Render the highlighted page to a PNG image (2× zoom for sharpness)
+        mat = fitz.Matrix(2, 2)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        img_bytes = pix.tobytes("png")
         out.close()
-        return pdf_bytes
+        return img_bytes
     except Exception as e:
         st.warning(f"Highlighting notice: {e}")
         return None
@@ -913,24 +915,7 @@ def render_pdf_panel(src: dict):
                 f"**Page {page_num + 1} of** `{source_file}` — "
                 "matching text highlighted in **gold** ✦"
             )
-            b64 = base64.b64encode(pdf_bytes).decode()
-            pdf_url = f"data:application/pdf;base64,{b64}#view=FitH&pagemode=none&navpanes=0&toolbar=0"
-            st.markdown(
-                f"""
-                <div style="height:700px; width:100%;">
-                    <iframe
-                        src="{pdf_url}"
-                        width="100%"
-                        height="700"
-                        style="border:none; border-radius:14px;
-                               box-shadow:0 12px 40px rgba(0,0,0,0.7);
-                               background: #0d1117;"
-                        title="PDF preview — {source_file}"
-                    ></iframe>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+            st.image(pdf_bytes, use_container_width=True)
         else:
             st.warning("Could not prepare the PDF preview.")
     else:
