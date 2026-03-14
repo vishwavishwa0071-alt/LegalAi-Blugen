@@ -22,30 +22,22 @@ from pathlib import Path
 # ─────────────────────────────────────────────
 #  Environment & Paths
 # ─────────────────────────────────────────────
-# In Streamlit Cloud, secrets are used instead of .env
-# For local dev, you can still use .env or .streamlit/secrets.toml
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
 except (KeyError, FileNotFoundError):
     load_dotenv()
     API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# Set BASE_DIR relative to this file's location (good for GitHub/Deployment)
-try:
-    ENV_LINK = st.secrets["DRIVE_LINK"]
-except (KeyError, FileNotFoundError):
-    ENV_LINK = os.getenv("DRIVE_LINK", "")
-
+# All paths are relative to this file — works both locally and on Streamlit Cloud
+# (PDFs must be committed to the repo under a pdf/ folder next to app.py)
 LOCAL_DIR = Path(__file__).parent.absolute()
 
-# Handle web URLs by falling back to local directory (Python cannot read URLs as local folders)
-if ENV_LINK.startswith("http"):
-    BASE_DIR = str(LOCAL_DIR)
-else:
-    BASE_DIR = ENV_LINK or str(LOCAL_DIR)
-
 UNIFIED_INDEX_DIR = os.path.join(LOCAL_DIR, "unified_vector_store")
-PDF_DIR = os.path.join(BASE_DIR, "pdf")
+PDF_DIR = os.path.join(LOCAL_DIR, "pdf")
+
+# FAISS L2 distance threshold – chunks with score above this are too dissimilar
+# Normalised Gemini embeddings: L2 range [0, 2], useful hits typically < 1.2
+RELEVANCE_SCORE_THRESHOLD = 1.2
 
 # ─────────────────────────────────────────────
 #  CSS – Dark Legal Theme
@@ -516,19 +508,74 @@ def load_llm():
 
 
 # ─────────────────────────────────────────────
+#  PDF Loader — local path first, GCS fallback
+#  Cached so each PDF is read from disk / network only once per session.
+# ─────────────────────────────────────────────
+@st.cache_data(show_spinner=False, max_entries=30)
+def load_pdf_bytes(pdf_path: str) -> bytes | None:
+    """Read PDF from the repo's pdf/ folder and cache the bytes for the session."""
+    if os.path.exists(pdf_path):
+        with open(pdf_path, "rb") as f:
+            return f.read()
+    return None
+
+
+# ─────────────────────────────────────────────
+#  Content relevance filter
+# ─────────────────────────────────────────────
+def is_index_or_toc_content(content: str) -> bool:
+    """
+    Return True if a chunk looks like a Table of Contents, Arrangement of Sections,
+    or other navigational boilerplate that adds no answer value.
+    """
+    c = content.lower().strip()
+
+    # Explicit TOC / index phrases
+    toc_phrases = [
+        "arrangement of sections",
+        "table of contents",
+        "index of sections",
+        "list of sections",
+        "list of forms",
+        "contents",
+    ]
+    for phrase in toc_phrases:
+        if phrase in c:
+            # Allow only if content also contains substantive legal language
+            legal_signals = ["shall", "court", "plaintiff", "defendant",
+                             "decree", "suit", "order", "section", "rule"]
+            if not any(sig in c for sig in legal_signals):
+                return True
+
+    # Too short to be useful (header/footer fragment)
+    if len(content.strip()) < 80:
+        return True
+
+    # TOC pattern: many short numbered lines like "5. Jurisdiction ... 12"
+    lines = [l.strip() for l in content.split("\n") if l.strip()]
+    if len(lines) >= 8:
+        toc_like = sum(1 for l in lines
+                       if len(l) < 80 and re.match(r"^\d+\.?\s", l))
+        if toc_like / len(lines) > 0.55:
+            return True
+
+    return False
+
+
+# ─────────────────────────────────────────────
 #  PDF: Extract single page + highlight → bytes
 # ─────────────────────────────────────────────
-def get_highlighted_pdf_bytes(pdf_path: str, page_num: int, search_text: str) -> bytes | None:
+def get_highlighted_pdf_bytes(raw_pdf_bytes: bytes, page_num: int, search_text: str) -> bytes | None:
     """
     Extract the target page and highlight relevant text from the retrieved context.
     Uses a multi-tier matching strategy to ensure the actual passage is found
     while avoiding 'dirty' highlights on common words/headers.
     """
     try:
-        if not os.path.exists(pdf_path):
+        if not raw_pdf_bytes:
             return None
-            
-        src = fitz.open(pdf_path)
+
+        src = fitz.open(stream=raw_pdf_bytes, filetype="pdf")
         if page_num >= len(src):
             page_num = len(src) - 1
 
@@ -664,6 +711,14 @@ def run_rag_query(query: str):
     seen = set()
 
     for doc, score in docs_and_scores:
+        # ── Score gate: skip chunks that are too dissimilar ──────────────
+        if float(score) > RELEVANCE_SCORE_THRESHOLD:
+            continue
+
+        # ── Content quality gate: skip TOC / index / boilerplate pages ───
+        if is_index_or_toc_content(doc.page_content):
+            continue
+
         cat = doc.metadata.get("category", "Unknown")
         sub_cat = doc.metadata.get("sub_category", "Unknown")
         source_file = doc.metadata.get("source_file", "Unknown")
@@ -848,9 +903,10 @@ def render_pdf_panel(src: dict):
     </div>
     """, unsafe_allow_html=True)
 
-    if os.path.exists(pdf_path):
+    raw_bytes = load_pdf_bytes(pdf_path)
+    if raw_bytes:
         with st.spinner("Loading PDF..."):
-            pdf_bytes = get_highlighted_pdf_bytes(pdf_path, page_num, content)
+            pdf_bytes = get_highlighted_pdf_bytes(raw_bytes, page_num, content)
 
         if pdf_bytes:
             st.markdown(
@@ -878,7 +934,7 @@ def render_pdf_panel(src: dict):
         else:
             st.warning("Could not prepare the PDF preview.")
     else:
-        st.error(f"PDF file not found:\n`{pdf_path}`")
+        st.error(f"PDF not found: `{source_file}`\n\nEnsure it is committed to the `pdf/` folder in the repo.")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
