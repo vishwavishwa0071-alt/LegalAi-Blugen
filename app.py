@@ -1,7 +1,9 @@
 import streamlit as st
 import os
 import re
+import json
 import fitz  # PyMuPDF
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -34,9 +36,12 @@ LOCAL_DIR = Path(__file__).parent.absolute()
 UNIFIED_INDEX_DIR = os.path.join(LOCAL_DIR, "unified_vector_store")
 PDF_DIR = os.path.join(LOCAL_DIR, "pdf")
 
-# FAISS L2 distance threshold – chunks with score above this are too dissimilar
-# Normalised Gemini embeddings: L2 range [0, 2], useful hits typically < 1.2
-RELEVANCE_SCORE_THRESHOLD = 1.2
+# FAISS L2 distance threshold – lower = stricter.
+# Normalised Gemini embeddings range [0, 2]; good legal hits are typically < 0.9.
+RELEVANCE_SCORE_THRESHOLD = 0.9
+
+# Max sources shown per answer (quality > quantity)
+MAX_SOURCES = 4
 
 # ─────────────────────────────────────────────
 #  CSS – Dark Legal Theme
@@ -562,6 +567,76 @@ def is_index_or_toc_content(content: str) -> bool:
 
 
 # ─────────────────────────────────────────────
+#  Page verification — confirm text is on page
+# ─────────────────────────────────────────────
+def verify_page_relevance(raw_bytes: bytes, claimed_page: int, content: str,
+                          radius: int = 2) -> int | None:
+    """
+    Confirm that the chunk's text physically exists on (or near) the claimed PDF page.
+
+    Strategy:
+      1. Extract 3 candidate phrases from different positions in the chunk and
+         search for each with fitz (exact text layer match).
+      2. If no exact hit, fall back to a word-overlap ratio: if ≥ 40% of the
+         chunk's significant words appear in the page's text, accept that page.
+         (Handles OCR'd PDFs where exact spacing differs.)
+      3. Search the claimed page first, then ±radius pages.
+
+    Returns the verified page number, or None if the text cannot be located.
+    """
+    if not raw_bytes:
+        return None
+    try:
+        doc = fitz.open(stream=raw_bytes, filetype="pdf")
+        total = len(doc)
+        clean = re.sub(r'\s+', ' ', content).strip()
+        words = clean.split()
+        n = len(words)
+
+        # Build candidate search phrases (skip leading section-header words)
+        phrases = []
+        if n >= 8:
+            mid = n // 3
+            phrases.append(" ".join(words[mid: mid + 7]))       # ~30% in
+        if n >= 6:
+            phrases.append(" ".join(words[2:8]))                # near start
+        if n >= 6:
+            phrases.append(" ".join(words[max(0, n-8): n-1]))   # near end
+        phrases = list(dict.fromkeys(p for p in phrases if p))  # deduplicate
+
+        # Word-overlap fallback: significant words (len > 4) in chunk
+        sig_words = [w.lower() for w in words if len(w) > 4]
+
+        # Search order: claimed page, then alternating ±1, ±2 …
+        order = [claimed_page]
+        for d in range(1, radius + 1):
+            if claimed_page - d >= 0:     order.append(claimed_page - d)
+            if claimed_page + d < total:  order.append(claimed_page + d)
+
+        for p in order:
+            page = doc[p]
+
+            # Stage 1 — exact phrase match
+            for phrase in phrases:
+                if page.search_for(phrase):
+                    doc.close()
+                    return p
+
+            # Stage 2 — word-overlap ratio (≥ 40% of significant words present)
+            if sig_words:
+                page_text = page.get_text().lower()
+                overlap = sum(1 for w in sig_words if w in page_text)
+                if overlap / len(sig_words) >= 0.40:
+                    doc.close()
+                    return p
+
+        doc.close()
+        return None   # text not found near the claimed page → skip this source
+    except Exception:
+        return None
+
+
+# ─────────────────────────────────────────────
 #  PDF: Extract single page + highlight → bytes
 # ─────────────────────────────────────────────
 def get_highlighted_pdf_bytes(raw_pdf_bytes: bytes, page_num: int, search_text: str) -> bytes | None:
@@ -700,53 +775,128 @@ Your task is to answer the user's question comprehensively using *only* the prov
 **Answer:**
 """
 
+RELEVANCE_JUDGE_PROMPT = """\
+You are a strict relevance judge for a legal document retrieval system.
+
+Given a user's legal question and a numbered list of retrieved document chunks, \
+return ONLY the indices of chunks that are **directly relevant** to answering the question.
+
+A chunk is relevant if it contains substantive information that directly answers, \
+defines, or provides procedural detail for the question. \
+Reject chunks that are only tangentially related, repeat generic boilerplate, \
+or discuss a different legal topic entirely.
+
+User Question: {query}
+
+Retrieved Chunks:
+{chunks_list}
+
+Respond with ONLY a JSON array of the relevant 0-based indices. Examples:
+  [0, 2]      ← chunks 0 and 2 are relevant
+  [1, 2, 3]   ← chunks 1, 2 and 3 are relevant
+  []           ← none are relevant
+
+JSON array:"""
+
 
 def run_rag_query(query: str):
-    """Run the unified RAG pipeline and return (answer_text, sources_list)."""
+    """
+    Run the unified RAG pipeline and return (answer_text, sources_list).
+
+    Two LLM calls run in parallel:
+      • Answer LLM — generates the legal answer from all verified candidates.
+      • Judge LLM  — selects which candidates are relevant enough to show as
+                     source preview buttons.
+    """
     vs = load_vector_store()
     llm = load_llm()
 
-    docs_and_scores = vs.similarity_search_with_score(query, k=8)
+    docs_and_scores = vs.similarity_search_with_score(query, k=12)
 
-    context_chunks = ""
-    sources = []
-    seen = set()
+    # ── Phase 1: build verified candidate list (gates 1-4) ───────────────
+    candidates = []
+    seen_pages = set()
 
     for doc, score in docs_and_scores:
-        # ── Score gate: skip chunks that are too dissimilar ──────────────
+        # Gate 1 – score
         if float(score) > RELEVANCE_SCORE_THRESHOLD:
             continue
-
-        # ── Content quality gate: skip TOC / index / boilerplate pages ───
+        # Gate 2 – content quality
         if is_index_or_toc_content(doc.page_content):
             continue
 
-        cat = doc.metadata.get("category", "Unknown")
-        sub_cat = doc.metadata.get("sub_category", "Unknown")
         source_file = doc.metadata.get("source_file", "Unknown")
-        page_num = int(doc.metadata.get("page", 0))
-        pdf_path = os.path.join(PDF_DIR, source_file)
+        page_num    = int(doc.metadata.get("page", 0))
+        pdf_path    = os.path.join(PDF_DIR, source_file)
 
-        context_chunks += (
-            f"--- Source: {source_file} (Category: {cat} | Sub-category: {sub_cat}) ---\n"
-            f"{doc.page_content}\n\n"
+        # Gate 3 – page verification (load_pdf_bytes is cached)
+        raw_bytes     = load_pdf_bytes(pdf_path)
+        verified_page = verify_page_relevance(raw_bytes, page_num, doc.page_content)
+        if verified_page is None:
+            continue
+        page_num = verified_page
+
+        # Gate 4 – deduplicate
+        key = (source_file, page_num)
+        if key in seen_pages:
+            continue
+        seen_pages.add(key)
+
+        candidates.append({
+            "category":     doc.metadata.get("category", "Unknown"),
+            "sub_category": doc.metadata.get("sub_category", "Unknown"),
+            "source_file":  source_file,
+            "pdf_path":     pdf_path,
+            "page":         page_num,
+            "content":      doc.page_content,
+            "score":        float(score),
+        })
+
+        if len(candidates) >= MAX_SOURCES:
+            break
+
+    # ── Phase 2: two parallel LLM calls ──────────────────────────────────
+    context_chunks = "".join(
+        f"--- Source: {c['source_file']} (Category: {c['category']} | "
+        f"Sub-category: {c['sub_category']}) ---\n{c['content']}\n\n"
+        for c in candidates
+    )
+
+    def call_answer_llm():
+        return llm.invoke(
+            LEGAL_PROMPT.format(context=context_chunks, query=query)
+        ).content
+
+    def call_judge_llm():
+        if not candidates:
+            return []
+        chunks_list = "\n\n".join(
+            f"[{i}] {c['source_file']}  p.{c['page'] + 1}:\n"
+            f"{c['content'][:300]}{'...' if len(c['content']) > 300 else ''}"
+            for i, c in enumerate(candidates)
         )
+        raw = llm.invoke(
+            RELEVANCE_JUDGE_PROMPT.format(query=query, chunks_list=chunks_list)
+        ).content.strip()
 
-        key = f"{source_file}:{page_num}"
-        if key not in seen:
-            seen.add(key)
-            sources.append({
-                "category": cat,
-                "sub_category": sub_cat,
-                "source_file": source_file,
-                "pdf_path": pdf_path,
-                "page": page_num,
-                "content": doc.page_content,
-                "score": float(score),
-            })
+        try:
+            match = re.search(r'\[[\d,\s]*\]', raw)
+            if match:
+                indices = json.loads(match.group())
+                return [i for i in indices
+                        if isinstance(i, int) and 0 <= i < len(candidates)]
+        except Exception:
+            pass
+        return list(range(len(candidates)))   # fallback: show all
 
-    response = llm.invoke(LEGAL_PROMPT.format(context=context_chunks, query=query))
-    return response.content, sources
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_answer = executor.submit(call_answer_llm)
+        future_judge  = executor.submit(call_judge_llm)
+        answer           = future_answer.result()
+        relevant_indices = future_judge.result()
+
+    sources = [candidates[i] for i in relevant_indices]
+    return answer, sources
 
 
 # ─────────────────────────────────────────────
