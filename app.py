@@ -9,11 +9,7 @@ from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
 
-try:
-    from streamlit_mic_recorder import speech_to_text as stt
-    VOICE_ENABLED = True
-except ImportError:
-    VOICE_ENABLED = False
+import streamlit.components.v1 as components  # for voice input component
 
 # ─────────────────────────────────────────────
 #  MUST be the very first Streamlit call
@@ -52,7 +48,7 @@ RELEVANCE_SCORE_THRESHOLD = 0.9
 MAX_SOURCES = 4
 
 # ─────────────────────────────────────────────
-#  CSS – Dark Legal Theme
+#  CSS – Light Legal Theme
 # ─────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -61,15 +57,23 @@ st.markdown("""
 
 /* ── Root Reset ── */
 html, body, [data-testid="stAppViewContainer"] {
-    background: #080c18 !important;
+    background: #f4f6fb !important;
     font-family: 'Inter', sans-serif;
-    color: #d4e4ff;
+    color: #162044;
 }
-[data-testid="stHeader"] { background: rgba(8, 12, 24, 0.9) !important; backdrop-filter: blur(10px); }
+[data-testid="stHeader"] { background: rgba(244,246,251,0.92) !important; backdrop-filter: blur(10px); border-bottom: 1px solid #d0daf0; }
 
-/* ── Fix White Bottom Bar ── */
+/* ── Sidebar ── */
+[data-testid="stSidebar"] {
+    background: #eef1f8 !important;
+    border-right: 1px solid #d0daf0 !important;
+}
+[data-testid="stSidebarContent"] { background: transparent !important; }
+
+/* ── Fix Bottom Bar ── */
 [data-testid="stBottom"] {
-    background: #080c18 !important;
+    background: #f4f6fb !important;
+    border-top: 1px solid #d0daf0;
 }
 [data-testid="stBottom"] > div {
     background: transparent !important;
@@ -77,8 +81,8 @@ html, body, [data-testid="stAppViewContainer"] {
 
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: #0d1117; }
-::-webkit-scrollbar-thumb { background: #2d4a7a; border-radius: 4px; }
+::-webkit-scrollbar-track { background: #e8ecf5; }
+::-webkit-scrollbar-thumb { background: #a0b4d8; border-radius: 4px; }
 
 /* ── Header Banner ── */
 .header-banner {
@@ -88,7 +92,7 @@ html, body, [data-testid="stAppViewContainer"] {
     display: flex;
     align-items: center;
     gap: 1rem;
-    box-shadow: 0 4px 30px rgba(0,0,0,0.6);
+    box-shadow: 0 4px 20px rgba(13,27,62,0.18);
     position: sticky;
     top: 0;
     z-index: 100;
@@ -104,7 +108,7 @@ html, body, [data-testid="stAppViewContainer"] {
     animation: shimmer 3s linear infinite;
 }
 @keyframes shimmer {
-    0% { background-position: 0% } 
+    0% { background-position: 0% }
     100% { background-position: 200% }
 }
 .header-badge {
@@ -118,18 +122,19 @@ html, body, [data-testid="stAppViewContainer"] {
     text-transform: uppercase;
 }
 .header-sub {
-    color: #8099c5;
+    color: #c8d4e8;
     font-size: 0.82rem;
     margin-top: 0.15rem;
 }
 
 /* ── Chat Container ── */
 .chat-container {
-    background: rgba(10, 18, 40, 0.4);
-    border: 1px solid rgba(56, 100, 180, 0.2);
+    background: #ffffff;
+    border: 1px solid #d0daf0;
     border-radius: 16px;
     padding: 1rem;
     margin-bottom: 1rem;
+    box-shadow: 0 2px 12px rgba(13,27,62,0.06);
 }
 .chat-scroll-area {
     height: 65vh !important;
@@ -164,12 +169,12 @@ html, body, [data-testid="stAppViewContainer"] {
 }
 .avatar.ai {
     background: linear-gradient(135deg, #1a3a6e, #0e5a8a);
-    border: 2px solid rgba(245,200,66,0.4);
+    border: 2px solid rgba(200,137,10,0.5);
     margin-right: 0.8rem;
 }
 .avatar.user {
     background: linear-gradient(135deg, #3d1c6e, #6b21a8);
-    border: 2px solid rgba(168,85,247,0.4);
+    border: 2px solid rgba(168,85,247,0.5);
     margin-left: 0.8rem;
 }
 
@@ -179,13 +184,13 @@ html, body, [data-testid="stAppViewContainer"] {
     border-radius: 18px;
     line-height: 1.6;
     font-size: 0.95rem;
-    box-shadow: 0 6px 25px rgba(0,0,0,0.45);
+    box-shadow: 0 3px 14px rgba(13,27,62,0.10);
     flex-grow: 0;
 }
 .bubble.ai {
-    background: linear-gradient(145deg, rgba(16,30,60,0.9), rgba(10,22,48,0.95));
-    border: 1px solid rgba(56,100,180,0.35);
-    color: #d4e4ff;
+    background: #ffffff;
+    border: 1px solid #d0daf0;
+    color: #162044;
     border-top-left-radius: 4px;
 }
 .bubble.user {
@@ -197,13 +202,14 @@ html, body, [data-testid="stAppViewContainer"] {
 
 /* ── Inline Sources Panel (per message) ── */
 .inline-sources-panel {
-    background: linear-gradient(145deg, rgba(8,14,32,0.97), rgba(5,10,24,0.99));
-    border: 1px solid rgba(56,100,180,0.3);
+    background: #ffffff;
+    border: 1px solid #d0daf0;
     border-radius: 14px;
     padding: 0.8rem 1rem;
     margin: 0;
     animation: fadeSlideIn 0.4s ease forwards;
     height: 100%;
+    box-shadow: 0 2px 10px rgba(13,27,62,0.07);
 }
 .inline-sources-header {
     display: flex;
@@ -211,19 +217,19 @@ html, body, [data-testid="stAppViewContainer"] {
     gap: 0.5rem;
     margin-bottom: 0.65rem;
     padding-bottom: 0.55rem;
-    border-bottom: 1px solid rgba(56,100,180,0.2);
+    border-bottom: 1px solid #e0e8f4;
 }
 .inline-sources-title {
     font-size: 0.75rem;
     font-weight: 600;
-    color: #8099c5;
+    color: #4a6080;
     text-transform: uppercase;
     letter-spacing: 0.07em;
 }
 /* Horizontal category label */
 .cat-col-label {
     font-size: 0.67rem;
-    color: #f5c842;
+    color: #c8890a;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.055em;
@@ -239,7 +245,7 @@ html, body, [data-testid="stAppViewContainer"] {
     content: '';
     display: inline-block;
     width: 3px; height: 10px;
-    background: #f5c842;
+    background: #c8890a;
     border-radius: 2px;
     flex-shrink: 0;
 }
@@ -248,12 +254,12 @@ html, body, [data-testid="stAppViewContainer"] {
     display: flex;
     align-items: center;
     gap: 0.4rem;
-    background: rgba(245,200,66,0.12);
-    border: 1px solid rgba(245,200,66,0.5);
+    background: #fdf3dc;
+    border: 1px solid rgba(200,137,10,0.5);
     border-radius: 8px;
     padding: 0.35rem 0.7rem;
     font-size: 0.76rem;
-    color: #f5c842;
+    color: #c8890a;
     margin-bottom: 4px;
     line-height: 1.3;
 }
@@ -261,12 +267,12 @@ html, body, [data-testid="stAppViewContainer"] {
 .cat-divider {
     font-size: 0.67rem;
     font-weight: 700;
-    color: #f5c842;
+    color: #c8890a;
     text-transform: uppercase;
     letter-spacing: 0.07em;
     margin: 0.55rem 0 0.3rem 0;
     padding-bottom: 0.25rem;
-    border-bottom: 1px solid rgba(245,200,66,0.2);
+    border-bottom: 1px solid rgba(200,137,10,0.2);
     display: flex;
     align-items: center;
     gap: 0.35rem;
@@ -283,23 +289,23 @@ html, body, [data-testid="stAppViewContainer"] {
 }
 .welcome-seal {
     font-size: 5rem;
-    filter: drop-shadow(0 0 20px rgba(245,200,66,0.4));
+    filter: drop-shadow(0 0 20px rgba(200,137,10,0.3));
     animation: pulse-glow 2.5s ease-in-out infinite;
 }
 @keyframes pulse-glow {
-    0%, 100% { filter: drop-shadow(0 0 12px rgba(245,200,66,0.3)); }
-    50% { filter: drop-shadow(0 0 30px rgba(245,200,66,0.7)); }
+    0%, 100% { filter: drop-shadow(0 0 12px rgba(200,137,10,0.25)); }
+    50% { filter: drop-shadow(0 0 28px rgba(200,137,10,0.55)); }
 }
 .welcome-title {
     font-family: 'Playfair Display', serif;
     font-size: 2rem;
     font-weight: 700;
-    color: #f5c842;
+    color: #162044;
     margin-top: 1rem;
     text-align: center;
 }
 .welcome-sub {
-    color: #8099c5;
+    color: #4a6080;
     text-align: center;
     max-width: 520px;
     margin-top: 0.5rem;
@@ -318,29 +324,30 @@ html, body, [data-testid="stAppViewContainer"] {
     display: inline-flex;
     align-items: center;
     gap: 0.4rem;
-    background: rgba(20,40,80,0.8);
-    border: 1px solid rgba(56,100,180,0.4);
+    background: #eef1f8;
+    border: 1px solid #c0cfe8;
     border-radius: 20px;
     padding: 0.3rem 0.75rem;
     font-size: 0.75rem;
-    color: #a0c0ff;
+    color: #3a5080;
     cursor: pointer;
     transition: all 0.2s;
 }
 .source-pill:hover {
-    border-color: rgba(245,200,66,0.6);
-    color: #f5c842;
-    background: rgba(30,55,100,0.9);
+    border-color: #c8890a;
+    color: #c8890a;
+    background: #fdf3dc;
 }
 
 /* ── PDF Preview Panel (right column) ── */
 .pdf-panel {
-    background: linear-gradient(185deg, rgba(10,18,40,0.98), rgba(6,14,32,0.99));
-    border: 1px solid rgba(56,100,180,0.35);
+    background: #ffffff;
+    border: 1px solid #d0daf0;
     border-radius: 16px;
     padding: 1.2rem;
     height: 100%;
     animation: fadeSlideIn 0.35s ease forwards;
+    box-shadow: 0 2px 12px rgba(13,27,62,0.07);
 }
 .pdf-panel-header {
     display: flex;
@@ -348,12 +355,12 @@ html, body, [data-testid="stAppViewContainer"] {
     gap: 0.6rem;
     margin-bottom: 0.8rem;
     padding-bottom: 0.8rem;
-    border-bottom: 1px solid rgba(56,100,180,0.25);
+    border-bottom: 1px solid #e0e8f4;
 }
 .pdf-panel-title {
     font-size: 0.85rem;
     font-weight: 600;
-    color: #d4e4ff;
+    color: #162044;
 }
 .pdf-meta-row {
     display: flex;
@@ -362,33 +369,33 @@ html, body, [data-testid="stAppViewContainer"] {
     margin-bottom: 0.8rem;
 }
 .pdf-meta-chip {
-    background: rgba(20,40,80,0.7);
-    border: 1px solid rgba(56,100,180,0.3);
+    background: #eef1f8;
+    border: 1px solid #c0cfe8;
     border-radius: 8px;
     padding: 0.2rem 0.6rem;
     font-size: 0.72rem;
-    color: #8099c5;
+    color: #4a6080;
 }
-.pdf-meta-chip span { color: #a8c4f0; font-weight: 500; }
+.pdf-meta-chip span { color: #1a3a6e; font-weight: 500; }
 .pdf-path-box {
-    background: rgba(8,14,32,0.8);
-    border: 1px solid rgba(30,60,120,0.5);
+    background: #f4f6fb;
+    border: 1px solid #c0cfe8;
     border-radius: 8px;
     padding: 0.5rem 0.75rem;
     font-size: 0.7rem;
-    color: #5a78b0;
+    color: #6080a0;
     font-family: 'Courier New', monospace;
     word-break: break-all;
     margin-bottom: 1rem;
 }
-.pdf-path-box span { color: #f5c842; }
+.pdf-path-box span { color: #c8890a; }
 .highlight-text-box {
-    background: rgba(245,200,66,0.06);
-    border-left: 3px solid #f5c842;
+    background: #fdf3dc;
+    border-left: 3px solid #c8890a;
     border-radius: 0 8px 8px 0;
     padding: 0.6rem 0.8rem;
     font-size: 0.78rem;
-    color: #c8d8f0;
+    color: #2a3a5c;
     line-height: 1.6;
     margin-bottom: 1rem;
     font-style: italic;
@@ -397,13 +404,15 @@ html, body, [data-testid="stAppViewContainer"] {
 /* ── Input Area Reset ── */
 [data-testid="stChatInput"] {
     border-radius: 12px !important;
+    border: 1px solid #c0cfe8 !important;
+    background: #ffffff !important;
 }
 
 /* ── Buttons ── */
 .stButton > button {
     background: linear-gradient(135deg, #1a3a7e, #0e5a8a) !important;
-    border: 1px solid rgba(56,100,180,0.5) !important;
-    color: #d4e4ff !important;
+    border: 1px solid rgba(56,100,180,0.4) !important;
+    color: #ffffff !important;
     border-radius: 12px !important;
     padding: 0.6rem 1.5rem !important;
     font-weight: 600 !important;
@@ -413,23 +422,24 @@ html, body, [data-testid="stAppViewContainer"] {
     letter-spacing: 0.02em !important;
 }
 .stButton > button:hover {
-    border-color: rgba(245,200,66,0.8) !important;
-    color: #f5c842 !important;
+    border-color: #c8890a !important;
+    color: #fdf3dc !important;
     transform: translateY(-2px) !important;
-    box-shadow: 0 8px 25px rgba(0,0,0,0.5), 0 0 10px rgba(245,200,66,0.2) !important;
+    box-shadow: 0 6px 18px rgba(13,27,62,0.18), 0 0 8px rgba(200,137,10,0.15) !important;
 }
 .stButton > button:active {
     transform: translateY(0px) !important;
 }
-/* Specifically for the Clear button to make it look distinct but premium */
+/* Clear button — distinct red-tinted variant */
 [data-testid="stBaseButton-secondary"].clear-btn {
-    background: rgba(40, 20, 20, 0.4) !important;
-    border: 1px solid rgba(255, 100, 100, 0.2) !important;
+    background: rgba(220,38,38,0.06) !important;
+    border: 1px solid rgba(220,38,38,0.2) !important;
+    color: #7a1a1a !important;
 }
 [data-testid="stBaseButton-secondary"].clear-btn:hover {
-    background: rgba(60, 20, 20, 0.6) !important;
-    border-color: rgba(255, 100, 100, 0.5) !important;
-    color: #ff8080 !important;
+    background: rgba(220,38,38,0.12) !important;
+    border-color: rgba(220,38,38,0.45) !important;
+    color: #b91c1c !important;
 }
 
 /* ── Spinners / loading ── */
@@ -440,7 +450,7 @@ html, body, [data-testid="stAppViewContainer"] {
 .thinking-row { display: flex; align-items: center; gap: 8px; padding: 0.8rem 1rem; }
 .dot {
     width: 8px; height: 8px;
-    background: #5a8fc5;
+    background: #6080b0;
     border-radius: 50%;
     animation: thinking-dots 1.4s infinite ease-in-out both;
 }
@@ -448,51 +458,45 @@ html, body, [data-testid="stAppViewContainer"] {
 .dot:nth-child(3) { animation-delay: 0.4s; }
 
 /* ── Dividers ── */
-hr { border-color: rgba(56,100,180,0.2) !important; }
+hr { border-color: #d0daf0 !important; }
 
 /* ── Expander ── */
 [data-testid="stExpander"] {
-    background: rgba(10,18,40,0.6) !important;
-    border: 1px solid rgba(56,100,180,0.25) !important;
+    background: #ffffff !important;
+    border: 1px solid #d0daf0 !important;
     border-radius: 10px !important;
 }
 [data-testid="stExpander"] summary {
-    color: #8099c5 !important;
+    color: #4a6080 !important;
     font-size: 0.8rem !important;
 }
 
 /* ── Chat History Sidebar ── */
 .hist-item {
-    background: rgba(15,28,60,0.7);
-    border: 1px solid rgba(56,100,180,0.25);
+    background: #ffffff;
+    border: 1px solid #d0daf0;
     border-radius: 10px;
     padding: 0.55rem 0.75rem;
     margin-bottom: 0.45rem;
     cursor: pointer;
-    transition: border-color 0.2s, background 0.2s;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    box-shadow: 0 1px 4px rgba(13,27,62,0.05);
 }
 .hist-item:hover {
-    border-color: rgba(245,200,66,0.5);
-    background: rgba(25,45,90,0.8);
+    border-color: #c8890a;
+    box-shadow: 0 2px 8px rgba(200,137,10,0.12);
 }
 .hist-date {
     font-size: 0.68rem;
-    color: #5a78b0;
+    color: #7090b0;
     margin-bottom: 0.2rem;
 }
 .hist-preview {
     font-size: 0.78rem;
-    color: #a0c0ff;
+    color: #2a3a5c;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-}
-
-/* ── Voice button wrapper ── */
-.voice-row {
-    display: flex;
-    justify-content: flex-end;
-    padding: 0 0 0.4rem 0;
 }
 
 /* ── Category stat pills ── */
@@ -504,14 +508,14 @@ hr { border-color: rgba(56,100,180,0.2) !important; }
     margin-bottom: 0.2rem;
 }
 .stat-pill {
-    background: rgba(15,30,70,0.8);
-    border: 1px solid rgba(56,100,180,0.3);
-    color: #8099c5;
+    background: #eef1f8;
+    border: 1px solid #c0cfe8;
+    color: #4a6080;
     font-size: 0.72rem;
     border-radius: 20px;
     padding: 0.2rem 0.6rem;
 }
-.stat-pill b { color: #c8d8f0; }
+.stat-pill b { color: #162044; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1168,7 +1172,7 @@ def render_thinking_indicator():
       <div class="avatar ai">⚖️</div>
       <div class="bubble ai" style="padding:0.6rem 1.2rem">
         <div class="thinking-row">
-          <span style="color:#5a8fc5;font-size:0.82rem">Analysing legal documents</span>
+          <span style="color:#4a6080;font-size:0.82rem">Analysing legal documents</span>
           <div class="dot"></div><div class="dot"></div><div class="dot"></div>
         </div>
       </div>
@@ -1270,28 +1274,84 @@ else:
 
 st.markdown("<div style='height:120px'></div>", unsafe_allow_html=True) # Spacer for chat input
 
-# ── Voice Input ───────────────────────────────────────────────────────────────
-if VOICE_ENABLED:
-    st.markdown('<div class="voice-row">', unsafe_allow_html=True)
-    voice_text = stt(
-        start_prompt="🎤 Speak",
-        stop_prompt="⏹ Stop",
-        language="en",
-        use_container_width=False,
-        just_once=True,
-        key="voice_stt",
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
-    if voice_text:
-        st.session_state.messages.append({
-            "role": "user",
-            "content": voice_text.strip(),
-            "sources": None,
-        })
-        st.session_state.preview_source = None
-        st.session_state.preview_msg_idx = None
-        st.session_state.is_thinking = True
-        st.rerun()
+# ── Voice Input — self-positioning mic button beside the chat-input send button ──
+_VOICE_HTML = """
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:transparent; overflow:hidden; }
+#mic {
+    width:38px; height:38px; border-radius:50%;
+    border:1.5px solid #c0cfe8;
+    background:#ffffff;
+    cursor:pointer; font-size:1.1rem;
+    display:flex; align-items:center; justify-content:center;
+    transition:all .2s;
+    box-shadow:0 2px 8px rgba(13,27,62,.10);
+    color:#4a6080;
+}
+#mic:hover { border-color:#1a3a7e; transform:scale(1.08); }
+#mic.listening {
+    border-color:#dc2626; background:#fff5f5;
+    animation:pulse-red 1s infinite;
+}
+@keyframes pulse-red {
+    0%,100% { box-shadow:0 0 0 0 rgba(220,38,38,.35); }
+    50%      { box-shadow:0 0 0 7px rgba(220,38,38,.0); }
+}
+</style></head><body>
+<div style="display:flex;align-items:center;justify-content:center;height:44px">
+  <button id="mic" title="Voice input (Chrome / Edge)">🎤</button>
+</div>
+<script>
+(function positionIframe() {
+    try {
+        const f = window.frameElement;
+        if (f) {
+            f.style.position   = 'fixed';
+            f.style.bottom     = '10px';
+            f.style.right      = '58px';
+            f.style.width      = '44px';
+            f.style.height     = '44px';
+            f.style.zIndex     = '9999';
+            f.style.border     = 'none';
+            f.style.background = 'transparent';
+        }
+    } catch(e) {}
+})();
+
+const btn = document.getElementById('mic');
+let recog = null;
+
+btn.addEventListener('click', () => {
+    if (recog) { recog.stop(); return; }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { alert('Voice input requires Chrome or Edge.'); return; }
+    recog = new SR();
+    recog.lang = 'en-IN';
+    recog.continuous = false;
+    recog.interimResults = false;
+    recog.onstart  = () => { btn.classList.add('listening'); btn.textContent = '⏹'; };
+    recog.onresult = (e) => { Streamlit.setComponentValue(e.results[0][0].transcript); };
+    recog.onerror  = () => { btn.classList.remove('listening'); btn.textContent = '🎤'; recog = null; };
+    recog.onend    = () => { btn.classList.remove('listening'); btn.textContent = '🎤'; recog = null; };
+    recog.start();
+});
+Streamlit.setFrameHeight(44);
+</script></body></html>
+"""
+
+voice_result = components.html(_VOICE_HTML, height=44)
+if isinstance(voice_result, str) and voice_result.strip():
+    st.session_state.messages.append({
+        "role": "user",
+        "content": voice_result.strip(),
+        "sources": None,
+    })
+    st.session_state.preview_source = None
+    st.session_state.preview_msg_idx = None
+    st.session_state.is_thinking = True
+    st.rerun()
 
 # ── Run the actual RAG engine ─────────────────────
 if st.session_state.is_thinking:
