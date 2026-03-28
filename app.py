@@ -1,11 +1,19 @@
 import streamlit as st
 import os
 import re
-import base64
+import json
 import fitz  # PyMuPDF
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
+
+try:
+    from streamlit_mic_recorder import speech_to_text as stt
+    VOICE_ENABLED = True
+except ImportError:
+    VOICE_ENABLED = False
 
 # ─────────────────────────────────────────────
 #  MUST be the very first Streamlit call
@@ -22,30 +30,26 @@ from pathlib import Path
 # ─────────────────────────────────────────────
 #  Environment & Paths
 # ─────────────────────────────────────────────
-# In Streamlit Cloud, secrets are used instead of .env
-# For local dev, you can still use .env or .streamlit/secrets.toml
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
 except (KeyError, FileNotFoundError):
     load_dotenv()
     API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# Set BASE_DIR relative to this file's location (good for GitHub/Deployment)
-try:
-    ENV_LINK = st.secrets["DRIVE_LINK"]
-except (KeyError, FileNotFoundError):
-    ENV_LINK = os.getenv("DRIVE_LINK", "")
-
+# All paths are relative to this file — works both locally and on Streamlit Cloud
+# (PDFs must be committed to the repo under a pdf/ folder next to app.py)
 LOCAL_DIR = Path(__file__).parent.absolute()
 
-# Handle web URLs by falling back to local directory (Python cannot read URLs as local folders)
-if ENV_LINK.startswith("http"):
-    BASE_DIR = str(LOCAL_DIR)
-else:
-    BASE_DIR = ENV_LINK or str(LOCAL_DIR)
-
 UNIFIED_INDEX_DIR = os.path.join(LOCAL_DIR, "unified_vector_store")
-PDF_DIR = os.path.join(BASE_DIR, "pdf")
+PDF_DIR = os.path.join(LOCAL_DIR, "pdf")
+HISTORY_FILE = os.path.join(LOCAL_DIR, "chat_history.json")
+
+# FAISS L2 distance threshold – lower = stricter.
+# Normalised Gemini embeddings range [0, 2]; good legal hits are typically < 0.9.
+RELEVANCE_SCORE_THRESHOLD = 0.9
+
+# Max sources shown per answer (quality > quantity)
+MAX_SOURCES = 4
 
 # ─────────────────────────────────────────────
 #  CSS – Dark Legal Theme
@@ -457,6 +461,40 @@ hr { border-color: rgba(56,100,180,0.2) !important; }
     font-size: 0.8rem !important;
 }
 
+/* ── Chat History Sidebar ── */
+.hist-item {
+    background: rgba(15,28,60,0.7);
+    border: 1px solid rgba(56,100,180,0.25);
+    border-radius: 10px;
+    padding: 0.55rem 0.75rem;
+    margin-bottom: 0.45rem;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+}
+.hist-item:hover {
+    border-color: rgba(245,200,66,0.5);
+    background: rgba(25,45,90,0.8);
+}
+.hist-date {
+    font-size: 0.68rem;
+    color: #5a78b0;
+    margin-bottom: 0.2rem;
+}
+.hist-preview {
+    font-size: 0.78rem;
+    color: #a0c0ff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ── Voice button wrapper ── */
+.voice-row {
+    display: flex;
+    justify-content: flex-end;
+    padding: 0 0 0.4rem 0;
+}
+
 /* ── Category stat pills ── */
 .stat-row {
     display: flex;
@@ -481,16 +519,57 @@ hr { border-color: rgba(56,100,180,0.2) !important; }
 # ─────────────────────────────────────────────
 #  Session State Initialization
 # ─────────────────────────────────────────────
+def load_chat_history() -> list:
+    """Load all past sessions from the history file."""
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def save_chat_session(messages: list):
+    """Append the current conversation to the history file (max 20 sessions)."""
+    if not messages:
+        return
+    first_user = next((m for m in messages if m["role"] == "user"), None)
+    if not first_user:
+        return
+    preview_text = first_user["content"]
+    preview = (preview_text[:55] + "…") if len(preview_text) > 55 else preview_text
+    session = {
+        "id": datetime.now().strftime("%Y%m%d_%H%M%S"),
+        "timestamp": datetime.now().strftime("%b %d, %Y  %I:%M %p"),
+        "preview": preview,
+        # Store only role + content; sources are heavyweight and not needed for history
+        "messages": [{"role": m["role"], "content": m["content"]} for m in messages],
+    }
+    history = load_chat_history()
+    history.insert(0, session)
+    history = history[:20]  # keep last 20 sessions
+    try:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass  # silent fail (e.g. read-only filesystem on cloud)
+
+
 def init_state():
     defaults = {
         "messages": [],          # [{role, content, sources}]
         "preview_source": None,  # Source dict currently shown in right-panel PDF viewer
         "preview_msg_idx": None, # Which message's source is being previewed
         "is_thinking": False,
+        "chat_history": None,    # cached history list (loaded once per session)
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+    # Load history once per session
+    if st.session_state.chat_history is None:
+        st.session_state.chat_history = load_chat_history()
 
 init_state()
 
@@ -516,19 +595,144 @@ def load_llm():
 
 
 # ─────────────────────────────────────────────
+#  PDF Loader — local path first, GCS fallback
+#  Cached so each PDF is read from disk / network only once per session.
+# ─────────────────────────────────────────────
+@st.cache_data(show_spinner=False, max_entries=30)
+def load_pdf_bytes(pdf_path: str) -> bytes | None:
+    """Read PDF from the repo's pdf/ folder and cache the bytes for the session."""
+    if os.path.exists(pdf_path):
+        with open(pdf_path, "rb") as f:
+            return f.read()
+    return None
+
+
+# ─────────────────────────────────────────────
+#  Content relevance filter
+# ─────────────────────────────────────────────
+def is_index_or_toc_content(content: str) -> bool:
+    """
+    Return True if a chunk looks like a Table of Contents, Arrangement of Sections,
+    or other navigational boilerplate that adds no answer value.
+    """
+    c = content.lower().strip()
+
+    # Explicit TOC / index phrases
+    toc_phrases = [
+        "arrangement of sections",
+        "table of contents",
+        "index of sections",
+        "list of sections",
+        "list of forms",
+        "contents",
+    ]
+    for phrase in toc_phrases:
+        if phrase in c:
+            # Allow only if content also contains substantive legal language
+            legal_signals = ["shall", "court", "plaintiff", "defendant",
+                             "decree", "suit", "order", "section", "rule"]
+            if not any(sig in c for sig in legal_signals):
+                return True
+
+    # Too short to be useful (header/footer fragment)
+    if len(content.strip()) < 80:
+        return True
+
+    # TOC pattern: many short numbered lines like "5. Jurisdiction ... 12"
+    lines = [l.strip() for l in content.split("\n") if l.strip()]
+    if len(lines) >= 8:
+        toc_like = sum(1 for l in lines
+                       if len(l) < 80 and re.match(r"^\d+\.?\s", l))
+        if toc_like / len(lines) > 0.55:
+            return True
+
+    return False
+
+
+# ─────────────────────────────────────────────
+#  Page verification — confirm text is on page
+# ─────────────────────────────────────────────
+def verify_page_relevance(raw_bytes: bytes, claimed_page: int, content: str,
+                          radius: int = 2) -> int | None:
+    """
+    Confirm that the chunk's text physically exists on (or near) the claimed PDF page.
+
+    Strategy:
+      1. Extract 3 candidate phrases from different positions in the chunk and
+         search for each with fitz (exact text layer match).
+      2. If no exact hit, fall back to a word-overlap ratio: if ≥ 40% of the
+         chunk's significant words appear in the page's text, accept that page.
+         (Handles OCR'd PDFs where exact spacing differs.)
+      3. Search the claimed page first, then ±radius pages.
+
+    Returns the verified page number, or None if the text cannot be located.
+    """
+    if not raw_bytes:
+        return None
+    try:
+        doc = fitz.open(stream=raw_bytes, filetype="pdf")
+        total = len(doc)
+        clean = re.sub(r'\s+', ' ', content).strip()
+        words = clean.split()
+        n = len(words)
+
+        # Build candidate search phrases (skip leading section-header words)
+        phrases = []
+        if n >= 8:
+            mid = n // 3
+            phrases.append(" ".join(words[mid: mid + 7]))       # ~30% in
+        if n >= 6:
+            phrases.append(" ".join(words[2:8]))                # near start
+        if n >= 6:
+            phrases.append(" ".join(words[max(0, n-8): n-1]))   # near end
+        phrases = list(dict.fromkeys(p for p in phrases if p))  # deduplicate
+
+        # Word-overlap fallback: significant words (len > 4) in chunk
+        sig_words = [w.lower() for w in words if len(w) > 4]
+
+        # Search order: claimed page, then alternating ±1, ±2 …
+        order = [claimed_page]
+        for d in range(1, radius + 1):
+            if claimed_page - d >= 0:     order.append(claimed_page - d)
+            if claimed_page + d < total:  order.append(claimed_page + d)
+
+        for p in order:
+            page = doc[p]
+
+            # Stage 1 — exact phrase match
+            for phrase in phrases:
+                if page.search_for(phrase):
+                    doc.close()
+                    return p
+
+            # Stage 2 — word-overlap ratio (≥ 40% of significant words present)
+            if sig_words:
+                page_text = page.get_text().lower()
+                overlap = sum(1 for w in sig_words if w in page_text)
+                if overlap / len(sig_words) >= 0.40:
+                    doc.close()
+                    return p
+
+        doc.close()
+        return None   # text not found near the claimed page → skip this source
+    except Exception:
+        return None
+
+
+# ─────────────────────────────────────────────
 #  PDF: Extract single page + highlight → bytes
 # ─────────────────────────────────────────────
-def get_highlighted_pdf_bytes(pdf_path: str, page_num: int, search_text: str) -> bytes | None:
+def get_highlighted_pdf_bytes(raw_pdf_bytes: bytes, page_num: int, search_text: str) -> bytes | None:
     """
     Extract the target page and highlight relevant text from the retrieved context.
     Uses a multi-tier matching strategy to ensure the actual passage is found
     while avoiding 'dirty' highlights on common words/headers.
     """
     try:
-        if not os.path.exists(pdf_path):
+        if not raw_pdf_bytes:
             return None
-            
-        src = fitz.open(pdf_path)
+
+        src = fitz.open(stream=raw_pdf_bytes, filetype="pdf")
         if page_num >= len(src):
             page_num = len(src) - 1
 
@@ -612,9 +816,12 @@ def get_highlighted_pdf_bytes(pdf_path: str, page_num: int, search_text: str) ->
             fallback_chunk = clean_text[middle:middle+50]
             _highlight_phrase(fallback_chunk, is_fallback=True)
 
-        pdf_bytes = out.tobytes(garbage=3, deflate=True)
+        # Render the highlighted page to a PNG image (2× zoom for sharpness)
+        mat = fitz.Matrix(2, 2)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        img_bytes = pix.tobytes("png")
         out.close()
-        return pdf_bytes
+        return img_bytes
     except Exception as e:
         st.warning(f"Highlighting notice: {e}")
         return None
@@ -651,45 +858,128 @@ Your task is to answer the user's question comprehensively using *only* the prov
 **Answer:**
 """
 
+RELEVANCE_JUDGE_PROMPT = """\
+You are a strict relevance judge for a legal document retrieval system.
+
+Given a user's legal question and a numbered list of retrieved document chunks, \
+return ONLY the indices of chunks that are **directly relevant** to answering the question.
+
+A chunk is relevant if it contains substantive information that directly answers, \
+defines, or provides procedural detail for the question. \
+Reject chunks that are only tangentially related, repeat generic boilerplate, \
+or discuss a different legal topic entirely.
+
+User Question: {query}
+
+Retrieved Chunks:
+{chunks_list}
+
+Respond with ONLY a JSON array of the relevant 0-based indices. Examples:
+  [0, 2]      ← chunks 0 and 2 are relevant
+  [1, 2, 3]   ← chunks 1, 2 and 3 are relevant
+  []           ← none are relevant
+
+JSON array:"""
+
 
 def run_rag_query(query: str):
-    """Run the unified RAG pipeline and return (answer_text, sources_list)."""
+    """
+    Run the unified RAG pipeline and return (answer_text, sources_list).
+
+    Two LLM calls run in parallel:
+      • Answer LLM — generates the legal answer from all verified candidates.
+      • Judge LLM  — selects which candidates are relevant enough to show as
+                     source preview buttons.
+    """
     vs = load_vector_store()
     llm = load_llm()
 
-    docs_and_scores = vs.similarity_search_with_score(query, k=8)
+    docs_and_scores = vs.similarity_search_with_score(query, k=12)
 
-    context_chunks = ""
-    sources = []
-    seen = set()
+    # ── Phase 1: build verified candidate list (gates 1-4) ───────────────
+    candidates = []
+    seen_pages = set()
 
     for doc, score in docs_and_scores:
-        cat = doc.metadata.get("category", "Unknown")
-        sub_cat = doc.metadata.get("sub_category", "Unknown")
+        # Gate 1 – score
+        if float(score) > RELEVANCE_SCORE_THRESHOLD:
+            continue
+        # Gate 2 – content quality
+        if is_index_or_toc_content(doc.page_content):
+            continue
+
         source_file = doc.metadata.get("source_file", "Unknown")
-        page_num = int(doc.metadata.get("page", 0))
-        pdf_path = os.path.join(PDF_DIR, source_file)
+        page_num    = int(doc.metadata.get("page", 0))
+        pdf_path    = os.path.join(PDF_DIR, source_file)
 
-        context_chunks += (
-            f"--- Source: {source_file} (Category: {cat} | Sub-category: {sub_cat}) ---\n"
-            f"{doc.page_content}\n\n"
+        # Gate 3 – page verification (load_pdf_bytes is cached)
+        raw_bytes     = load_pdf_bytes(pdf_path)
+        verified_page = verify_page_relevance(raw_bytes, page_num, doc.page_content)
+        if verified_page is None:
+            continue
+        page_num = verified_page
+
+        # Gate 4 – deduplicate
+        key = (source_file, page_num)
+        if key in seen_pages:
+            continue
+        seen_pages.add(key)
+
+        candidates.append({
+            "category":     doc.metadata.get("category", "Unknown"),
+            "sub_category": doc.metadata.get("sub_category", "Unknown"),
+            "source_file":  source_file,
+            "pdf_path":     pdf_path,
+            "page":         page_num,
+            "content":      doc.page_content,
+            "score":        float(score),
+        })
+
+        if len(candidates) >= MAX_SOURCES:
+            break
+
+    # ── Phase 2: two parallel LLM calls ──────────────────────────────────
+    context_chunks = "".join(
+        f"--- Source: {c['source_file']} (Category: {c['category']} | "
+        f"Sub-category: {c['sub_category']}) ---\n{c['content']}\n\n"
+        for c in candidates
+    )
+
+    def call_answer_llm():
+        return llm.invoke(
+            LEGAL_PROMPT.format(context=context_chunks, query=query)
+        ).content
+
+    def call_judge_llm():
+        if not candidates:
+            return []
+        chunks_list = "\n\n".join(
+            f"[{i}] {c['source_file']}  p.{c['page'] + 1}:\n"
+            f"{c['content'][:300]}{'...' if len(c['content']) > 300 else ''}"
+            for i, c in enumerate(candidates)
         )
+        raw = llm.invoke(
+            RELEVANCE_JUDGE_PROMPT.format(query=query, chunks_list=chunks_list)
+        ).content.strip()
 
-        key = f"{source_file}:{page_num}"
-        if key not in seen:
-            seen.add(key)
-            sources.append({
-                "category": cat,
-                "sub_category": sub_cat,
-                "source_file": source_file,
-                "pdf_path": pdf_path,
-                "page": page_num,
-                "content": doc.page_content,
-                "score": float(score),
-            })
+        try:
+            match = re.search(r'\[[\d,\s]*\]', raw)
+            if match:
+                indices = json.loads(match.group())
+                return [i for i in indices
+                        if isinstance(i, int) and 0 <= i < len(candidates)]
+        except Exception:
+            pass
+        return list(range(len(candidates)))   # fallback: show all
 
-    response = llm.invoke(LEGAL_PROMPT.format(context=context_chunks, query=query))
-    return response.content, sources
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_answer = executor.submit(call_answer_llm)
+        future_judge  = executor.submit(call_judge_llm)
+        answer           = future_answer.result()
+        relevant_indices = future_judge.result()
+
+    sources = [candidates[i] for i in relevant_indices]
+    return answer, sources
 
 
 # ─────────────────────────────────────────────
@@ -848,37 +1138,21 @@ def render_pdf_panel(src: dict):
     </div>
     """, unsafe_allow_html=True)
 
-    if os.path.exists(pdf_path):
+    raw_bytes = load_pdf_bytes(pdf_path)
+    if raw_bytes:
         with st.spinner("Loading PDF..."):
-            pdf_bytes = get_highlighted_pdf_bytes(pdf_path, page_num, content)
+            pdf_bytes = get_highlighted_pdf_bytes(raw_bytes, page_num, content)
 
         if pdf_bytes:
             st.markdown(
                 f"**Page {page_num + 1} of** `{source_file}` — "
                 "matching text highlighted in **gold** ✦"
             )
-            b64 = base64.b64encode(pdf_bytes).decode()
-            pdf_url = f"data:application/pdf;base64,{b64}#view=FitH&pagemode=none&navpanes=0&toolbar=0"
-            st.markdown(
-                f"""
-                <div style="height:700px; width:100%;">
-                    <iframe
-                        src="{pdf_url}"
-                        width="100%"
-                        height="700"
-                        style="border:none; border-radius:14px;
-                               box-shadow:0 12px 40px rgba(0,0,0,0.7);
-                               background: #0d1117;"
-                        title="PDF preview — {source_file}"
-                    ></iframe>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+            st.image(pdf_bytes, use_container_width=True)
         else:
             st.warning("Could not prepare the PDF preview.")
     else:
-        st.error(f"PDF file not found:\n`{pdf_path}`")
+        st.error(f"PDF not found: `{source_file}`\n\nEnsure it is committed to the `pdf/` folder in the repo.")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -912,17 +1186,52 @@ with st.sidebar:
         <div style="font-family:'Playfair Display', serif; font-size:1.2rem; color:#f5c842;">Legal AI Control</div>
     </div>
     """, unsafe_allow_html=True)
-    
+
     st.markdown("---")
-    
+
     if st.button("🗑️ Clear Conversation", key="clear_btn_sidebar", use_container_width=True):
+        save_chat_session(st.session_state.messages)  # persist before wiping
         st.session_state.messages = []
         st.session_state.preview_source = None
         st.session_state.preview_msg_idx = None
+        st.session_state.chat_history = load_chat_history()
         st.rerun()
-    
+
     st.markdown("<br>", unsafe_allow_html=True)
     st.info("Click any document source next to an AI response to view the verified PDF excerpt.")
+
+    # ── Chat History ─────────────────────────────────────────
+    st.markdown("---")
+    st.markdown(
+        "<div style='font-size:0.85rem;font-weight:600;color:#8099c5;text-transform:uppercase;"
+        "letter-spacing:0.07em;margin-bottom:0.6rem'>📜 Chat History</div>",
+        unsafe_allow_html=True,
+    )
+
+    history_list = st.session_state.chat_history or []
+    if not history_list:
+        st.caption("No saved conversations yet.")
+    else:
+        for session in history_list[:15]:
+            sid = session["id"]
+            # Render a styled card; clicking the button loads the session
+            st.markdown(
+                f'<div class="hist-item">'
+                f'<div class="hist-date">🕐 {session["timestamp"]}</div>'
+                f'<div class="hist-preview">{session["preview"]}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("Load", key=f"hist_load_{sid}", use_container_width=True):
+                save_chat_session(st.session_state.messages)
+                st.session_state.messages = [
+                    {"role": m["role"], "content": m["content"], "sources": None}
+                    for m in session["messages"]
+                ]
+                st.session_state.preview_source = None
+                st.session_state.preview_msg_idx = None
+                st.session_state.chat_history = load_chat_history()
+                st.rerun()
 
 # ─────────────────────────────────────────────
 #  Main Chat Layout (Full Width)
@@ -960,6 +1269,29 @@ else:
         render_thinking_indicator()
 
 st.markdown("<div style='height:120px'></div>", unsafe_allow_html=True) # Spacer for chat input
+
+# ── Voice Input ───────────────────────────────────────────────────────────────
+if VOICE_ENABLED:
+    st.markdown('<div class="voice-row">', unsafe_allow_html=True)
+    voice_text = stt(
+        start_prompt="🎤 Speak",
+        stop_prompt="⏹ Stop",
+        language="en",
+        use_container_width=False,
+        just_once=True,
+        key="voice_stt",
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+    if voice_text:
+        st.session_state.messages.append({
+            "role": "user",
+            "content": voice_text.strip(),
+            "sources": None,
+        })
+        st.session_state.preview_source = None
+        st.session_state.preview_msg_idx = None
+        st.session_state.is_thinking = True
+        st.rerun()
 
 # ── Run the actual RAG engine ─────────────────────
 if st.session_state.is_thinking:

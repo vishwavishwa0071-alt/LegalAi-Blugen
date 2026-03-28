@@ -7,3 +7,4 @@ python-dotenv
 google-generativeai
 streamlit
 PyMuPDF
+streamlit-mic-recorder
