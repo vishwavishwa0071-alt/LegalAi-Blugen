@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
 
-import streamlit.components.v1 as components  # for voice input component
 
 # ─────────────────────────────────────────────
 #  MUST be the very first Streamlit call
@@ -1274,84 +1273,98 @@ else:
 
 st.markdown("<div style='height:120px'></div>", unsafe_allow_html=True) # Spacer for chat input
 
-# ── Voice Input — self-positioning mic button beside the chat-input send button ──
-_VOICE_HTML = """
-<!DOCTYPE html><html><head><meta charset="utf-8">
+# ── Voice Input — injected directly into the page DOM, floated next to send button ──
+st.markdown("""
 <style>
-* { margin:0; padding:0; box-sizing:border-box; }
-body { background:transparent; overflow:hidden; }
-#mic {
-    width:38px; height:38px; border-radius:50%;
-    border:1.5px solid #c0cfe8;
-    background:#ffffff;
-    cursor:pointer; font-size:1.1rem;
-    display:flex; align-items:center; justify-content:center;
-    transition:all .2s;
-    box-shadow:0 2px 8px rgba(13,27,62,.10);
-    color:#4a6080;
+#legalai-mic-btn {
+    position: fixed;
+    bottom: 13px;
+    right: 60px;
+    z-index: 9999;
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    border: 1.5px solid #c0cfe8;
+    background: #ffffff;
+    cursor: pointer;
+    font-size: 1.1rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all .2s;
+    box-shadow: 0 2px 8px rgba(13,27,62,.12);
+    padding: 0;
+    line-height: 1;
 }
-#mic:hover { border-color:#1a3a7e; transform:scale(1.08); }
-#mic.listening {
-    border-color:#dc2626; background:#fff5f5;
-    animation:pulse-red 1s infinite;
+#legalai-mic-btn:hover  { border-color: #1a3a7e; transform: scale(1.08); }
+#legalai-mic-btn:active { transform: scale(0.96); }
+#legalai-mic-btn.listening {
+    border-color: #dc2626;
+    background: #fff5f5;
+    animation: legalai-pulse 1s infinite;
 }
-@keyframes pulse-red {
-    0%,100% { box-shadow:0 0 0 0 rgba(220,38,38,.35); }
-    50%      { box-shadow:0 0 0 7px rgba(220,38,38,.0); }
+@keyframes legalai-pulse {
+    0%,100% { box-shadow: 0 0 0 0 rgba(220,38,38,.35); }
+    50%      { box-shadow: 0 0 0 7px rgba(220,38,38,0); }
 }
-</style></head><body>
-<div style="display:flex;align-items:center;justify-content:center;height:44px">
-  <button id="mic" title="Voice input (Chrome / Edge)">🎤</button>
-</div>
+</style>
+
+<button id="legalai-mic-btn" title="Voice input (Chrome / Edge)">🎤</button>
+
 <script>
-(function positionIframe() {
-    try {
-        const f = window.frameElement;
-        if (f) {
-            f.style.position   = 'fixed';
-            f.style.bottom     = '10px';
-            f.style.right      = '58px';
-            f.style.width      = '44px';
-            f.style.height     = '44px';
-            f.style.zIndex     = '9999';
-            f.style.border     = 'none';
-            f.style.background = 'transparent';
-        }
-    } catch(e) {}
+(function () {
+    const btn = document.getElementById('legalai-mic-btn');
+    let recog = null;
+
+    btn.addEventListener('click', () => {
+        if (recog) { recog.stop(); return; }
+
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SR) { alert('Voice input requires Chrome or Edge.'); return; }
+
+        recog = new SR();
+        recog.lang = 'en-IN';
+        recog.continuous = false;
+        recog.interimResults = false;
+
+        recog.onstart = () => {
+            btn.classList.add('listening');
+            btn.textContent = '⏹';
+        };
+
+        recog.onresult = (e) => {
+            const text = e.results[0][0].transcript;
+            // Fill Streamlit's chat textarea and submit using React synthetic event trick
+            const ta = document.querySelector('[data-testid="stChatInputTextArea"]');
+            if (!ta) return;
+            const nativeSetter = Object.getOwnPropertyDescriptor(
+                window.HTMLTextAreaElement.prototype, 'value'
+            ).set;
+            nativeSetter.call(ta, text);
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
+            // Give React a tick to register the value, then click Send
+            setTimeout(() => {
+                const sendBtn = document.querySelector('[data-testid="stChatInputSubmitButton"]');
+                if (sendBtn) sendBtn.click();
+            }, 80);
+        };
+
+        recog.onerror = () => {
+            btn.classList.remove('listening');
+            btn.textContent = '🎤';
+            recog = null;
+        };
+        recog.onend = () => {
+            btn.classList.remove('listening');
+            btn.textContent = '🎤';
+            recog = null;
+        };
+
+        recog.start();
+    });
 })();
-
-const btn = document.getElementById('mic');
-let recog = null;
-
-btn.addEventListener('click', () => {
-    if (recog) { recog.stop(); return; }
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { alert('Voice input requires Chrome or Edge.'); return; }
-    recog = new SR();
-    recog.lang = 'en-IN';
-    recog.continuous = false;
-    recog.interimResults = false;
-    recog.onstart  = () => { btn.classList.add('listening'); btn.textContent = '⏹'; };
-    recog.onresult = (e) => { Streamlit.setComponentValue(e.results[0][0].transcript); };
-    recog.onerror  = () => { btn.classList.remove('listening'); btn.textContent = '🎤'; recog = null; };
-    recog.onend    = () => { btn.classList.remove('listening'); btn.textContent = '🎤'; recog = null; };
-    recog.start();
-});
-Streamlit.setFrameHeight(44);
-</script></body></html>
-"""
-
-voice_result = components.html(_VOICE_HTML, height=44)
-if isinstance(voice_result, str) and voice_result.strip():
-    st.session_state.messages.append({
-        "role": "user",
-        "content": voice_result.strip(),
-        "sources": None,
-    })
-    st.session_state.preview_source = None
-    st.session_state.preview_msg_idx = None
-    st.session_state.is_thinking = True
-    st.rerun()
+</script>
+""", unsafe_allow_html=True)
 
 # ── Run the actual RAG engine ─────────────────────
 if st.session_state.is_thinking:
