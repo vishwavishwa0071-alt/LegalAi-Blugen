@@ -2,12 +2,15 @@ import streamlit as st
 import os
 import re
 import json
+import io
+from sarvamai import SarvamAI
 import fitz  # PyMuPDF
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
+from streamlit_mic_recorder import mic_recorder
 
 
 # ─────────────────────────────────────────────
@@ -30,6 +33,11 @@ try:
 except (KeyError, FileNotFoundError):
     load_dotenv()
     API_KEY = os.getenv("GOOGLE_API_KEY")
+
+try:
+    SARVAM_API_KEY = st.secrets["SARVAM_API_KEY"]
+except (KeyError, FileNotFoundError):
+    SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
 # All paths are relative to this file — works both locally and on Streamlit Cloud
 # (PDFs must be committed to the repo under a pdf/ folder next to app.py)
@@ -595,6 +603,19 @@ def load_vector_store():
 @st.cache_resource(show_spinner=False)
 def load_llm():
     return ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", google_api_key=API_KEY)
+
+
+def transcribe_with_sarvam(audio_bytes: bytes) -> str:
+    """Transcribe audio using Sarvam AI Python client (Tamil — ta-IN)."""
+    if not SARVAM_API_KEY:
+        raise ValueError("SARVAM_API_KEY is not set in secrets or environment.")
+    client = SarvamAI(api_subscription_key=SARVAM_API_KEY)
+    response = client.speech_to_text.transcribe(
+        file=("audio.wav", io.BytesIO(audio_bytes), "audio/wav"),
+        model="saaras:v3",
+        language_code="ta-IN",
+    )
+    return (getattr(response, "transcript", "") or "").strip()
 
 
 # ─────────────────────────────────────────────
@@ -1273,98 +1294,50 @@ else:
 
 st.markdown("<div style='height:120px'></div>", unsafe_allow_html=True) # Spacer for chat input
 
-# ── Voice Input — injected directly into the page DOM, floated next to send button ──
+# ── Voice Input — mic_recorder captures audio; Gemini transcribes it ─────────
 st.markdown("""
 <style>
-#legalai-mic-btn {
-    position: fixed;
-    bottom: 13px;
-    right: 60px;
-    z-index: 9999;
-    width: 38px;
-    height: 38px;
-    border-radius: 50%;
-    border: 1.5px solid #c0cfe8;
-    background: #ffffff;
-    cursor: pointer;
-    font-size: 1.1rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all .2s;
-    box-shadow: 0 2px 8px rgba(13,27,62,.12);
-    padding: 0;
-    line-height: 1;
-}
-#legalai-mic-btn:hover  { border-color: #1a3a7e; transform: scale(1.08); }
-#legalai-mic-btn:active { transform: scale(0.96); }
-#legalai-mic-btn.listening {
-    border-color: #dc2626;
-    background: #fff5f5;
-    animation: legalai-pulse 1s infinite;
-}
-@keyframes legalai-pulse {
-    0%,100% { box-shadow: 0 0 0 0 rgba(220,38,38,.35); }
-    50%      { box-shadow: 0 0 0 7px rgba(220,38,38,0); }
+/* Style the mic recorder to blend with the input bar */
+[data-testid="stBottom"] .stAudio { display: none; }
+div[data-testid="column"]:last-child .stButton > button {
+    border-radius: 50% !important;
+    width: 42px !important; height: 42px !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    border: 1.5px solid #c0cfe8 !important;
+    font-size: 1.1rem !important;
+    box-shadow: 0 2px 8px rgba(13,27,62,.10) !important;
 }
 </style>
-
-<button id="legalai-mic-btn" title="Voice input (Chrome / Edge)">🎤</button>
-
-<script>
-(function () {
-    const btn = document.getElementById('legalai-mic-btn');
-    let recog = null;
-
-    btn.addEventListener('click', () => {
-        if (recog) { recog.stop(); return; }
-
-        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SR) { alert('Voice input requires Chrome or Edge.'); return; }
-
-        recog = new SR();
-        recog.lang = 'en-IN';
-        recog.continuous = false;
-        recog.interimResults = false;
-
-        recog.onstart = () => {
-            btn.classList.add('listening');
-            btn.textContent = '⏹';
-        };
-
-        recog.onresult = (e) => {
-            const text = e.results[0][0].transcript;
-            // Fill Streamlit's chat textarea and submit using React synthetic event trick
-            const ta = document.querySelector('[data-testid="stChatInputTextArea"]');
-            if (!ta) return;
-            const nativeSetter = Object.getOwnPropertyDescriptor(
-                window.HTMLTextAreaElement.prototype, 'value'
-            ).set;
-            nativeSetter.call(ta, text);
-            ta.dispatchEvent(new Event('input', { bubbles: true }));
-            // Give React a tick to register the value, then click Send
-            setTimeout(() => {
-                const sendBtn = document.querySelector('[data-testid="stChatInputSubmitButton"]');
-                if (sendBtn) sendBtn.click();
-            }, 80);
-        };
-
-        recog.onerror = () => {
-            btn.classList.remove('listening');
-            btn.textContent = '🎤';
-            recog = null;
-        };
-        recog.onend = () => {
-            btn.classList.remove('listening');
-            btn.textContent = '🎤';
-            recog = null;
-        };
-
-        recog.start();
-    });
-})();
-</script>
 """, unsafe_allow_html=True)
+
+_, mic_col = st.columns([0.88, 0.12])
+with mic_col:
+    audio = mic_recorder(
+        start_prompt="🎤",
+        stop_prompt="⏹",
+        just_once=True,
+        use_container_width=True,
+        key="voice_rec",
+    )
+
+if audio and audio.get("bytes"):
+    with st.spinner("🎙️ Transcribing with Sarvam STT…"):
+        try:
+            voice_text = transcribe_with_sarvam(audio["bytes"])
+        except Exception as e:
+            voice_text = ""
+            st.error(f"Sarvam STT error: {e}")
+    if voice_text:
+        st.session_state.messages.append({
+            "role": "user",
+            "content": voice_text,
+            "sources": None,
+        })
+        st.session_state.preview_source = None
+        st.session_state.preview_msg_idx = None
+        st.session_state.is_thinking = True
+        st.rerun()
 
 # ── Run the actual RAG engine ─────────────────────
 if st.session_state.is_thinking:

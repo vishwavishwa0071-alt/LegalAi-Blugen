@@ -1,7 +1,7 @@
 # Environment variables (NEVER commit API keys!)
 .env
 *.env
-
+.claude/
 # Python cache
 __pycache__/
 *.py[cod]
